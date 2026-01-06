@@ -57,7 +57,6 @@ def main():
             for col in ["Source Link(s)", "Reported Date (By SGA)", "Additional Notes (Internal Only)"]:
                 if col in df.columns:
                     res[col] = row[col]
-
             results.append(res)
             
         except Exception as e:
