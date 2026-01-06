@@ -11,3 +11,5 @@ selenium
 beautifulsoup4
 streamlit
 xlsxwriter
+chromium
+chromium-driver

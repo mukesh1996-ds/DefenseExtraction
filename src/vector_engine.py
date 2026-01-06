@@ -2,20 +2,28 @@ import os
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from config import API_KEY_FORMATTED, BASE_URL, EMBEDDING_MODEL
 
+# 1. FIXED: Removed API_KEY_FORMATTED from imports
+from config import BASE_URL, EMBEDDING_MODEL 
 
 class DefenseVectorDB:
-    def __init__(self, persist_dir):
+    # 2. FIXED: Added api_key as an argument
+    def __init__(self, persist_dir, api_key=None):
         print("Initializing Vector Database (ChromaDB) with OpenAI Embeddings...")
         
         self.persist_dir = persist_dir
 
+        # 3. FIXED: Logic to use passed key OR environment variable
+        final_api_key = api_key or os.environ.get("OPENAI_API_KEY")
+
+        if not final_api_key:
+            # This prevents the app from crashing silently; it tells you exactly what's wrong.
+            raise ValueError("OpenAI API Key is missing. Please provide it in the sidebar.")
+
         # Initialize OpenAI Embeddings
-        # We pass the same API key and Base URL from config
         self.embeddings = OpenAIEmbeddings(
             model=EMBEDDING_MODEL,
-            openai_api_key=API_KEY_FORMATTED,
+            openai_api_key=final_api_key, # Use the dynamic key
             openai_api_base=BASE_URL 
         )
         

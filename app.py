@@ -16,11 +16,10 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.edge.options import Options as EdgeOptions
 from selenium.webdriver.edge.service import Service as EdgeService
 
-# Import Project ID from config (Ensure config.py is cleaned of getpass logic!)
+# Import Project ID from config
 try:
     from config import PROJECT_ID
 except ImportError:
-    # Fallback if config isn't found or set up
     PROJECT_ID = "my-test-project"
 
 # --- PAGE CONFIGURATION ---
@@ -31,7 +30,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- CUSTOM CSS FOR BEAUTIFICATION ---
+# --- CUSTOM CSS ---
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
@@ -51,9 +50,8 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- IMPORT HANDLING (Graceful Fail) ---
+# --- IMPORT HANDLING ---
 try:
-    # Ensure src files do not have 'input()' or 'getpass()' at top level
     from src.vector_engine import DefenseVectorDB
     from src.processors import classify_full_record_rag
     from src.validators import run_all_validations
@@ -63,7 +61,7 @@ except ImportError as e:
     IMPORTS_LOADED = False
     IMPORT_ERROR_MSG = str(e)
 
-# --- GLOBAL CONFIG & SESSION STATE ---
+# --- GLOBAL VARIABLES ---
 TARGET_COLUMNS = [
     "Customer Region", "Customer Country", "Customer Operator",
     "Supplier Region", "Supplier Country", "Domestic Content",
@@ -96,35 +94,44 @@ def detect_header(paragraph_index, all_paragraphs):
 def get_driver():
     """
     Intelligent Driver Selection:
-    - If Linux (Streamlit Cloud): Uses Headless Chrome/Chromium.
-    - If Windows/Local: Uses Edge (visible window).
+    1. Streamlit Cloud (Linux): Auto-detects and uses Chromium (Headless).
+    2. Local (Windows): Uses Edge Driver (Visible).
     """
     if sys.platform == "linux":
-        # --- CLOUD CONFIGURATION (Headless Chrome) ---
+        # --- CLOUD CONFIGURATION (Headless Chromium) ---
         options = ChromeOptions()
         options.add_argument("--headless")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         
-        # Auto-detect driver location
+        # 1. Locate the Chromium Binary (Installed via packages.txt)
+        chromium_path = shutil.which("chromium") or "/usr/bin/chromium"
+        options.binary_location = chromium_path
+        
+        # 2. Locate the Driver (Installed via packages.txt)
         driver_path = shutil.which("chromedriver") or "/usr/bin/chromedriver"
+        
+        # 3. Create Service
         service = ChromeService(driver_path)
         return webdriver.Chrome(service=service, options=options)
+        
     else:
         # --- LOCAL CONFIGURATION (Edge) ---
-        # You can adjust this path if your local driver is elsewhere
+        # Checks if your specific local path exists, otherwise falls back to system path
         driver_path = "driver/msedgedriver.exe" 
-        if not os.path.exists(driver_path):
-            st.error(f"Local driver not found at {driver_path}. Please check path.")
-            return None
-            
-        service = EdgeService(driver_path)
+        
+        if os.path.exists(driver_path):
+            service = EdgeService(driver_path)
+        else:
+            # Try to find it in PATH or just let Selenium manager handle it (newer versions)
+            service = EdgeService() 
+
         options = EdgeOptions()
         options.add_argument("--start-maximized")
         return webdriver.Edge(service=service, options=options)
 
-# --- SIDEBAR: SETUP ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2312/2312214.png", width=80)
     st.title("Settings")
@@ -132,10 +139,8 @@ with st.sidebar:
     st.markdown("### 1. API Configuration")
     st.caption(f"Project ID: `{PROJECT_ID}`")
     
-    # User inputs only the token
     user_token = st.text_input("LLM Foundry Token", type="password", placeholder="Enter your token...")
     
-    # Construct the full key dynamically
     formatted_api_key = None
     if user_token:
         formatted_api_key = f"{user_token}:{PROJECT_ID}"
@@ -151,30 +156,27 @@ with st.sidebar:
         st.error("❌ RAG Modules Missing")
         st.caption(f"Error: {IMPORT_ERROR_MSG}")
 
-# --- MAIN APP UI ---
+# --- MAIN UI ---
 st.title("🛡️ Defense Contract Intelligence Hub")
 st.markdown("Merged Workflow: **Targeted Scraper** + **Defense RAG Processor**")
 
 # ==========================================================
-# PHASE 1: DATA UPLOAD & ID EXTRACTION
+# PHASE 1: DATA UPLOAD
 # ==========================================================
 st.header("1. Data Ingestion")
 uploaded_file = st.file_uploader("Upload Source Excel File", type=['xlsx'])
 
 if uploaded_file:
-    # Read Data
     try:
         df_source = pd.read_excel(uploaded_file)
         df_source['Contract Date'] = pd.to_datetime(df_source["Contract Date"], dayfirst=True, errors="coerce")
         
-        # UI Metrics
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Total Rows", len(df_source))
         with col2:
             st.metric("Unique URLs", df_source['Source URL'].nunique())
             
-        # ID Extraction Logic
         id_pattern = r"\b[A-Z0-9]{5,}-\d{2}-[A-Z]-\d{4}\b"
         extracted_ids = []
         for text in df_source['Contract Description'].astype(str):
@@ -196,14 +198,13 @@ if uploaded_file:
     st.divider()
 
     # ==========================================================
-    # PHASE 2: SELENIUM SCRAPER
+    # PHASE 2: SCRAPER
     # ==========================================================
     st.header("2. Live Scraping Execution")
     
     col_a, col_b = st.columns([1, 3])
-    
     with col_a:
-        st.info("Scraper will run in background (Cloud) or open browser (Local).")
+        st.info("Scraper runs in background on Cloud, or opens browser locally.")
         start_scrape = st.button("🚀 Launch Scraper", type="primary")
 
     if start_scrape:
@@ -211,17 +212,14 @@ if uploaded_file:
         progress_bar = st.progress(0)
         
         try:
-            # Setup Map
             url_date_map = df_source.set_index('Source URL')['Contract Date'].to_dict()
             urls = df_source['Source URL'].dropna().unique().tolist()
             
-            # Initialize Driver (Cross-Platform)
+            # --- GET DRIVER (Cloud or Local) ---
             driver = get_driver()
             
             if driver:
                 scraped_data = []
-                
-                # Execution Loop
                 for idx, url in enumerate(urls):
                     status_container.write(f"🌍 Visiting [{idx+1}/{len(urls)}]: {url}")
                     progress_bar.progress((idx + 1) / len(urls))
@@ -230,20 +228,16 @@ if uploaded_file:
                     
                     try:
                         driver.get(url)
-                        time.sleep(2) # Slight delay to let page load
+                        time.sleep(2) 
                         
                         html = driver.page_source
                         soup = BeautifulSoup(html, "html.parser")
                         
-                        # Logic: Find Body
                         body_div = soup.select_one("div.content.content-wrap div.inside.ntext div.body")
-                        
                         if body_div:
                             paragraphs = body_div.find_all("p")
                             for p_index, p in enumerate(paragraphs):
                                 text = p.get_text(" ", strip=True)
-                                
-                                # Check against ALL unique extracted IDs
                                 matched_ids = [cid for cid in flat_ids if cid in text]
                                 
                                 if matched_ids:
@@ -261,14 +255,11 @@ if uploaded_file:
                 driver.quit()
                 status_container.update(label="Scraping Complete!", state="complete", expanded=False)
                 
-                # --- UPDATED POST-PROCESSING LOGIC (Grouping) ---
+                # Processing Results
                 expanded_rows = []
-                
                 for row in scraped_data:
                     num_ids = len(row["Matched_IDs"])
-                    
                     if num_ids > 1:
-                        # Group Logic
                         combined_ids = ", ".join(row["Matched_IDs"])
                         expanded_rows.append({
                             "Source Link(s)": row["URL"],
@@ -279,7 +270,6 @@ if uploaded_file:
                             "Supplier Name": "Multiple" 
                         })
                     else:
-                        # Standard Logic
                         expanded_rows.append({
                             "Source Link(s)": row["URL"],
                             "Contract Date": row["Contract_Date"],
@@ -290,29 +280,26 @@ if uploaded_file:
                         })
                 
                 st.session_state.scraped_df = pd.DataFrame(expanded_rows)
-                
                 if not st.session_state.scraped_df.empty:
                     st.session_state.scraped_df['Contract Date'] = pd.to_datetime(st.session_state.scraped_df['Contract Date']).dt.date
             
         except Exception as e:
             st.error(f"Critical Scraper Error: {e}")
 
-    # Display Scraped Results
     if st.session_state.scraped_df is not None:
         st.success(f"Successfully scraped {len(st.session_state.scraped_df)} relevant records.")
         st.dataframe(st.session_state.scraped_df, use_container_width=True)
-        
         st.divider()
 
         # ==========================================================
-        # PHASE 3: RAG / LLM PROCESSING
+        # PHASE 3: RAG PROCESSING
         # ==========================================================
         st.header("3. AI Intelligence Processor")
         
         if not IMPORTS_LOADED:
-            st.warning("⚠️ RAG modules (src folder) not found. Cannot proceed.")
+            st.warning("⚠️ RAG modules (src folder) not found.")
         elif not formatted_api_key:
-            st.warning("⚠️ Please enter LLM Foundry Token in sidebar to start AI processing.")
+            st.warning("⚠️ Please enter LLM Foundry Token in sidebar to start.")
         else:
             col_rag_1, col_rag_2 = st.columns([1, 3])
             with col_rag_1:
@@ -323,7 +310,7 @@ if uploaded_file:
                 rag_progress = st.progress(0)
                 
                 try:
-                    # Init DB with EXPLICIT Key passed from Sidebar
+                    # Initialize DB using the MANUALLY passed key
                     rag_db = DefenseVectorDB(persist_dir="./db_storage", api_key=formatted_api_key)
                     
                     df_to_process = st.session_state.scraped_df
@@ -339,24 +326,24 @@ if uploaded_file:
                         pre_supplier = str(row.get("Supplier Name", ""))
                         
                         try:
-                            # 1. Classification
+                            # 1. Classify
                             res = classify_full_record_rag(desc, c_date, rag_db)
                             
-                            # 2. Validation
+                            # 2. Validate
                             try:
                                 res = run_all_validations(res, desc)
                             except:
                                 pass
                             
-                            # 3. Override Supplier
+                            # 3. Override
                             if pre_supplier == "Multiple":
                                 res["Supplier Name"] = "Multiple"
 
-                            # 4. Standardization
+                            # 4. Standardize
                             if "Value (Million)" in res:
                                 res["Value (USD$ Million)"] = res["Value (Million)"]
                             
-                            # 5. Metadata Merge
+                            # 5. Metadata
                             res["Description of Contract"] = desc
                             res["Contract Date"] = c_date
                             res["Source Link(s)"] = row.get("Source Link(s)", "")
@@ -371,19 +358,18 @@ if uploaded_file:
                     
                     rag_status.update(label="AI Processing Complete!", state="complete", expanded=False)
                     
-                    # Final Formatting
                     processed_df = pd.DataFrame(results)
                     for col in TARGET_COLUMNS:
                         if col not in processed_df.columns:
                             processed_df[col] = ""
-                            
+                    
                     st.session_state.final_df = processed_df[TARGET_COLUMNS]
                     
                 except Exception as e:
                     st.error(f"RAG Pipeline Error: {e}")
 
         # ==========================================================
-        # PHASE 4: RESULTS & EXPORT
+        # PHASE 4: EXPORT
         # ==========================================================
         if st.session_state.final_df is not None:
             st.header("4. Final Intelligence Report")
@@ -399,6 +385,5 @@ if uploaded_file:
                 file_name="Final_Defense_Contracts_Analyzed.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
 else:
     st.info("👋 Please upload an Excel file to begin.")

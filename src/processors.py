@@ -8,9 +8,11 @@ import os
 from dateutil import parser
 from dateutil.relativedelta import relativedelta
 from sentence_transformers import CrossEncoder
+from openai import OpenAI  # Added this import
 
 # Imports from other files
-from config import get_api_client, MODEL_NAME
+# FIXED: Removed get_api_client, Added BASE_URL
+from config import MODEL_NAME, BASE_URL 
 from data.taxonomy import (
     TAXONOMY_STR, VALID_DEPENDENCIES, GEOGRAPHY_MAPPING, 
     VALID_OPERATORS, SUPPLIER_LIST, PROGRAM_TYPES, DOMESTIC_CONTENT_OPTIONS
@@ -20,14 +22,10 @@ from src.prompts import (
     GEOGRAPHY_PROMPT, FINANCIAL_PROMPT, DOMESTIC_CONTENT_PROMPT
 )
 
-client = get_api_client()
-
 # ==========================================
 # 0. INITIALIZE RE-RANKER (GLOBAL)
 # ==========================================
 # LOGIC UPDATE: Try Online -> Fail -> Try Local Folder
-
-# NOTE: We point to the FOLDER, not the specific file.
 LOCAL_MODEL_PATH = r"C:\Users\mukeshkr\Desktop\DefenseExtraction\model"
 
 print("Loading Cross-Encoder Re-Ranker model...")
@@ -43,7 +41,6 @@ except Exception as e_hub:
     try:
         # 2. Try loading from your local folder
         if os.path.exists(LOCAL_MODEL_PATH):
-            # We pass the FOLDER path. It automatically finds model.safetensors & config.json
             RERANKER_MODEL = CrossEncoder(LOCAL_MODEL_PATH)
             print(f"Success: Re-Ranker loaded from local path.")
         else:
@@ -98,8 +95,12 @@ def get_best_taxonomy_match(extracted_name: str) -> str:
 # ==========================================
 
 def call_llm(prompt_text: str) -> dict:
-    time.sleep(2) 
+    time.sleep(1) 
     try:
+        # FIXED: Initialize Client HERE, not globally.
+        # This picks up the API Key set in Streamlit's os.environ at runtime.
+        client = OpenAI(base_url=BASE_URL)
+        
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
@@ -241,6 +242,7 @@ def classify_full_record_rag(description: str, contract_date_str: str, vector_db
         taxonomy=TAXONOMY_STR,
         text=description
     )
+    # Lazy init of client happens inside this call now
     raw_class_result = call_llm(classify_prompt)
     base_result = validate_and_fix(raw_class_result)
 
