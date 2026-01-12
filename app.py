@@ -91,27 +91,26 @@ def detect_header(paragraph_index, all_paragraphs):
                 return header_text
     return "UNKNOWN"
 
+def normalize_id(id_str):
+    """Removes hyphens to allow for 'smart matching'."""
+    return str(id_str).replace("-", "").strip().upper()
+
 def get_driver():
     """
-    Intelligent Driver Selection:
-    1. Streamlit Cloud (Linux): Headless Chromium with Anti-Detection headers.
-    2. Local (Windows): Uses Edge Driver (Visible).
+    Intelligent Driver Selection with Cloud Support
     """
     if sys.platform == "linux":
-        # --- CLOUD CONFIGURATION (Headless Chromium) ---
+        # --- CLOUD CONFIGURATION ---
         options = ChromeOptions()
         options.add_argument("--headless")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         
-        # 1. FIX: Set Window Size to mimic Desktop (prevents mobile layout shifts)
+        # Anti-Detection Headers
         options.add_argument("--window-size=1920,1080")
-        
-        # 2. FIX: Set Real User-Agent (prevents bot detection)
         options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         
-        # 3. Locate Binaries
         chromium_path = shutil.which("chromium") or "/usr/bin/chromium"
         options.binary_location = chromium_path
         
@@ -121,7 +120,7 @@ def get_driver():
         return webdriver.Chrome(service=service, options=options)
         
     else:
-        # --- LOCAL CONFIGURATION (Edge) ---
+        # --- LOCAL CONFIGURATION ---
         driver_path = "driver/msedgedriver.exe" 
         
         if os.path.exists(driver_path):
@@ -179,10 +178,19 @@ if uploaded_file:
         with col2:
             st.metric("Unique URLs", df_source['Source URL'].nunique())
             
-        id_pattern = r"\b[A-Z0-9]{5,}-\d{2}-[A-Z]-\d{4}\b"
+        # --- UPDATED ID EXTRACTION LOGIC ---
+        # 1. Matches Dash format: N66001-21-A-0083
+        # 2. Matches Continuous format: N0001914C0036 (13 chars: 6alpha+2digit+1alpha+4digit)
+        dash_pattern = r"\b[A-Z0-9]{6}-\d{2}-[A-Z0-9]-\d{4}\b"
+        continuous_pattern = r"\b[A-Z0-9]{6}\d{2}[A-Z0-9]\d{4}\b"
+        
+        # Combine patterns with OR (|)
+        combined_pattern = f"{dash_pattern}|{continuous_pattern}"
+
         extracted_ids = []
         for text in df_source['Contract Description'].astype(str):
-            match_ids = re.findall(id_pattern, text)
+            # Find all matches for either pattern
+            match_ids = re.findall(combined_pattern, text)
             extracted_ids.append(match_ids)
         
         flat_ids = sorted(list(set([cid for sub in extracted_ids for cid in sub])))
@@ -191,7 +199,10 @@ if uploaded_file:
             st.metric("Extracted Contract IDs", len(flat_ids))
 
         with st.expander("🔍 View Extracted IDs"):
-            st.write(flat_ids)
+            if len(flat_ids) > 0:
+                st.write(flat_ids)
+            else:
+                st.warning("No IDs extracted. Scraper will rely only on URLs.")
             
     except Exception as e:
         st.error(f"Error processing file: {e}")
@@ -217,11 +228,16 @@ if uploaded_file:
             url_date_map = df_source.set_index('Source URL')['Contract Date'].to_dict()
             urls = df_source['Source URL'].dropna().unique().tolist()
             
-            # --- GET DRIVER (Cloud or Local) ---
             driver = get_driver()
             
             if driver:
                 scraped_data = []
+                
+                # Pre-calculate normalized IDs for faster matching
+                # This creates a map: "N6600121A0083" -> "N66001-21-A-0083"
+                # So we can match clean text but return the original formatted ID
+                normalized_id_map = {normalize_id(cid): cid for cid in flat_ids}
+                
                 for idx, url in enumerate(urls):
                     status_container.write(f"🌍 Visiting [{idx+1}/{len(urls)}]: {url}")
                     progress_bar.progress((idx + 1) / len(urls))
@@ -230,45 +246,44 @@ if uploaded_file:
                     
                     try:
                         driver.get(url)
-                        # FIX: Increased wait time to 5s for Cloud Latency
-                        time.sleep(5) 
+                        time.sleep(5) # Wait for JS
                         
                         html = driver.page_source
                         soup = BeautifulSoup(html, "html.parser")
                         
-                        # FIX: Multi-step Selector Strategy
-                        # 1. Try the strict selector first
+                        # Fallback Selector Strategy
                         body_div = soup.select_one("div.content.content-wrap div.inside.ntext div.body")
-                        
-                        # 2. Fallback: If strict selector fails, try generic content div
-                        if not body_div:
-                             body_div = soup.select_one("div.body")
-                        
-                        # 3. Last Resort: Scan the entire body tag
-                        if not body_div:
-                             body_div = soup.find("body")
+                        if not body_div: body_div = soup.select_one("div.body")
+                        if not body_div: body_div = soup.find("body")
 
                         if body_div:
                             paragraphs = body_div.find_all("p")
                             
-                            # Optional: Debug line to see if scraper sees text
-                            # st.write(f"DEBUG: Found {len(paragraphs)} paragraphs on {url}")
-
                             for p_index, p in enumerate(paragraphs):
                                 text = p.get_text(" ", strip=True)
-                                matched_ids = [cid for cid in flat_ids if cid in text]
                                 
-                                if matched_ids:
+                                # --- UPDATED MATCHING LOGIC ---
+                                # 1. Normalize the paragraph text (remove dashes temporary for check)
+                                clean_text = normalize_id(text)
+                                
+                                # 2. Check if any of our target IDs exist in this paragraph
+                                # We check if the 'clean' ID is inside the 'clean' paragraph text
+                                found_matches = []
+                                for clean_id, original_id in normalized_id_map.items():
+                                    if clean_id in clean_text:
+                                        found_matches.append(original_id)
+                                
+                                if found_matches:
                                     header = detect_header(p_index, paragraphs)
                                     scraped_data.append({
                                         "URL": url,
                                         "Contract_Date": current_date,
                                         "Header": header,
-                                        "Matched_IDs": matched_ids, 
+                                        "Matched_IDs": found_matches, 
                                         "Paragraph_Text": text
                                     })
                         else:
-                            status_container.write(f"⚠️ Warning: No content found on {url} (Selectors failed)")
+                            status_container.write(f"⚠️ Warning: No content found on {url}")
 
                     except Exception as e:
                         status_container.write(f"⚠️ Error on {url}: {e}")
@@ -331,7 +346,6 @@ if uploaded_file:
                 rag_progress = st.progress(0)
                 
                 try:
-                    # Initialize DB using the MANUALLY passed key
                     rag_db = DefenseVectorDB(persist_dir="./db_storage", api_key=formatted_api_key)
                     
                     df_to_process = st.session_state.scraped_df
