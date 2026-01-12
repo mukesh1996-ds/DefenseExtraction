@@ -94,7 +94,7 @@ def detect_header(paragraph_index, all_paragraphs):
 def get_driver():
     """
     Intelligent Driver Selection:
-    1. Streamlit Cloud (Linux): Auto-detects and uses Chromium (Headless).
+    1. Streamlit Cloud (Linux): Headless Chromium with Anti-Detection headers.
     2. Local (Windows): Uses Edge Driver (Visible).
     """
     if sys.platform == "linux":
@@ -105,26 +105,28 @@ def get_driver():
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         
-        # 1. Locate the Chromium Binary (Installed via packages.txt)
+        # 1. FIX: Set Window Size to mimic Desktop (prevents mobile layout shifts)
+        options.add_argument("--window-size=1920,1080")
+        
+        # 2. FIX: Set Real User-Agent (prevents bot detection)
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        # 3. Locate Binaries
         chromium_path = shutil.which("chromium") or "/usr/bin/chromium"
         options.binary_location = chromium_path
         
-        # 2. Locate the Driver (Installed via packages.txt)
         driver_path = shutil.which("chromedriver") or "/usr/bin/chromedriver"
-        
-        # 3. Create Service
         service = ChromeService(driver_path)
+        
         return webdriver.Chrome(service=service, options=options)
         
     else:
         # --- LOCAL CONFIGURATION (Edge) ---
-        # Checks if your specific local path exists, otherwise falls back to system path
         driver_path = "driver/msedgedriver.exe" 
         
         if os.path.exists(driver_path):
             service = EdgeService(driver_path)
         else:
-            # Try to find it in PATH or just let Selenium manager handle it (newer versions)
             service = EdgeService() 
 
         options = EdgeOptions()
@@ -228,14 +230,30 @@ if uploaded_file:
                     
                     try:
                         driver.get(url)
-                        time.sleep(2) 
+                        # FIX: Increased wait time to 5s for Cloud Latency
+                        time.sleep(5) 
                         
                         html = driver.page_source
                         soup = BeautifulSoup(html, "html.parser")
                         
+                        # FIX: Multi-step Selector Strategy
+                        # 1. Try the strict selector first
                         body_div = soup.select_one("div.content.content-wrap div.inside.ntext div.body")
+                        
+                        # 2. Fallback: If strict selector fails, try generic content div
+                        if not body_div:
+                             body_div = soup.select_one("div.body")
+                        
+                        # 3. Last Resort: Scan the entire body tag
+                        if not body_div:
+                             body_div = soup.find("body")
+
                         if body_div:
                             paragraphs = body_div.find_all("p")
+                            
+                            # Optional: Debug line to see if scraper sees text
+                            # st.write(f"DEBUG: Found {len(paragraphs)} paragraphs on {url}")
+
                             for p_index, p in enumerate(paragraphs):
                                 text = p.get_text(" ", strip=True)
                                 matched_ids = [cid for cid in flat_ids if cid in text]
@@ -249,6 +267,9 @@ if uploaded_file:
                                         "Matched_IDs": matched_ids, 
                                         "Paragraph_Text": text
                                     })
+                        else:
+                            status_container.write(f"⚠️ Warning: No content found on {url} (Selectors failed)")
+
                     except Exception as e:
                         status_container.write(f"⚠️ Error on {url}: {e}")
                 
