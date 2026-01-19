@@ -6,6 +6,8 @@ import re
 import os
 import sys
 import shutil
+import json
+import datetime  # FIXED: Added datetime import
 from bs4 import BeautifulSoup
 from io import BytesIO
 
@@ -52,8 +54,8 @@ st.markdown("""
 
 # --- IMPORT HANDLING ---
 try:
-    from src.vector_engine import DefenseVectorDB
-    from src.processors import classify_full_record_rag
+    # UPDATED IMPORTS FOR NEW LOGIC
+    from src.processors import classify_record_with_memory
     from src.validators import run_all_validations
     IMPORTS_LOADED = True
     IMPORT_ERROR_MSG = ""
@@ -62,6 +64,7 @@ except ImportError as e:
     IMPORT_ERROR_MSG = str(e)
 
 # --- GLOBAL VARIABLES ---
+# EXACT COLUMNS REQUESTED BY USER
 TARGET_COLUMNS = [
     "Customer Region", "Customer Country", "Customer Operator",
     "Supplier Region", "Supplier Country", "Domestic Content",
@@ -69,10 +72,10 @@ TARGET_COLUMNS = [
     "System Name (General)", "System Name (Specific)", "System Piloting",
     "Supplier Name", "Program Type", "Expected MRO Contract Duration (Months)",
     "Quantity", "Value Certainty", "Value (Million)", "Currency",
-    "Value (USD$ Million)", "G2G/B2G", "Signing Month", "Signing Year",
-    "Description of Contract", "Additional Notes (Internal Only)",
-    "Source Link(s)", "Contract Date", "Reported Date (By SGA)",
-    "Matched_ID", "Header"
+    "Value (USD$ Million)", "Value Note (If Any)", "G2G/B2G", 
+    "Signing Month", "Signing Year", "Description of Contract", 
+    "Additional Notes (Internal Only)", "Source Link(s)", 
+    "Contract Date", "Reported Date (By SGA)"
 ]
 
 if 'scraped_df' not in st.session_state:
@@ -150,275 +153,318 @@ with st.sidebar:
         st.success("✅ Token Loaded!")
 
     st.divider()
-    st.info("System Status:")
+    st.markdown("### 2. System Check")
     if IMPORTS_LOADED:
         st.write("✅ RAG Modules Active")
     else:
         st.error("❌ RAG Modules Missing")
         st.caption(f"Error: {IMPORT_ERROR_MSG}")
 
+    # Check for Memory File
+    mem_file_path = "/content/Market Segment.xlsx" # Default path in code
+    local_mem_path = "Market Segment.xlsx"
+    if os.path.exists(mem_file_path) or os.path.exists(local_mem_path):
+        st.write("✅ Analyst Memory File Found")
+    else:
+        st.warning("⚠️ 'Market Segment.xlsx' not found. Memory disabled.")
+
 # --- MAIN UI ---
 st.title("🛡️ Defense Contract Intelligence Hub")
-st.markdown("Merged Workflow: **Targeted Scraper** + **Defense RAG Processor**")
+
+# TABS FOR WORKFLOW
+tab_batch, tab_demo = st.tabs(["📁 Batch Processing (File)", "🧪 Live Demo (Test)"])
 
 # ==========================================================
-# PHASE 1: DATA UPLOAD
+# TAB 1: BATCH PROCESSING
 # ==========================================================
-st.header("1. Data Ingestion")
-uploaded_file = st.file_uploader("Upload Source Excel File", type=['xlsx'])
-
-if uploaded_file:
-    try:
-        df_source = pd.read_excel(uploaded_file)
-        df_source['Contract Date'] = pd.to_datetime(df_source["Contract Date"], dayfirst=True, errors="coerce")
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Rows", len(df_source))
-        with col2:
-            st.metric("Unique URLs", df_source['Source URL'].nunique())
-            
-        # --- UPDATED ID EXTRACTION LOGIC ---
-        # 1. Matches Dash format: N66001-21-A-0083
-        # 2. Matches Continuous format: N0001914C0036 (13 chars: 6alpha+2digit+1alpha+4digit)
-        dash_pattern = r"\b[A-Z0-9]{6}-\d{2}-[A-Z0-9]-\d{4}\b"
-        continuous_pattern = r"\b[A-Z0-9]{6}\d{2}[A-Z0-9]\d{4}\b"
-        
-        # Combine patterns with OR (|)
-        combined_pattern = f"{dash_pattern}|{continuous_pattern}"
-
-        extracted_ids = []
-        for text in df_source['Contract Description'].astype(str):
-            # Find all matches for either pattern
-            match_ids = re.findall(combined_pattern, text)
-            extracted_ids.append(match_ids)
-        
-        flat_ids = sorted(list(set([cid for sub in extracted_ids for cid in sub])))
-        
-        with col3:
-            st.metric("Extracted Contract IDs", len(flat_ids))
-
-        with st.expander("🔍 View Extracted IDs"):
-            if len(flat_ids) > 0:
-                st.write(flat_ids)
-            else:
-                st.warning("No IDs extracted. Scraper will rely only on URLs.")
-            
-    except Exception as e:
-        st.error(f"Error processing file: {e}")
-        st.stop()
-
-    st.divider()
-
-    # ==========================================================
-    # PHASE 2: SCRAPER
-    # ==========================================================
-    st.header("2. Live Scraping Execution")
+with tab_batch:
+    st.markdown("Merged Workflow: **Targeted Scraper** + **Analyst Memory Processor**")
     
-    col_a, col_b = st.columns([1, 3])
-    with col_a:
-        st.info("Scraper runs in background on Cloud, or opens browser locally.")
-        start_scrape = st.button("🚀 Launch Scraper", type="primary")
+    # 1. DATA UPLOAD
+    st.subheader("1. Data Ingestion")
+    uploaded_file = st.file_uploader("Upload Source Excel File", type=['xlsx'])
 
-    if start_scrape:
-        status_container = st.status("Initializing Browser...", expanded=True)
-        progress_bar = st.progress(0)
-        
+    if uploaded_file:
         try:
-            url_date_map = df_source.set_index('Source URL')['Contract Date'].to_dict()
-            urls = df_source['Source URL'].dropna().unique().tolist()
+            df_source = pd.read_excel(uploaded_file)
+            df_source['Contract Date'] = pd.to_datetime(df_source["Contract Date"], dayfirst=True, errors="coerce")
             
-            driver = get_driver()
-            
-            if driver:
-                scraped_data = []
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Rows", len(df_source))
+            with col2:
+                st.metric("Unique URLs", df_source['Source URL'].nunique())
                 
-                # Pre-calculate normalized IDs for faster matching
-                # This creates a map: "N6600121A0083" -> "N66001-21-A-0083"
-                # So we can match clean text but return the original formatted ID
-                normalized_id_map = {normalize_id(cid): cid for cid in flat_ids}
-                
-                for idx, url in enumerate(urls):
-                    status_container.write(f"🌍 Visiting [{idx+1}/{len(urls)}]: {url}")
-                    progress_bar.progress((idx + 1) / len(urls))
-                    
-                    current_date = url_date_map.get(url)
-                    
-                    try:
-                        driver.get(url)
-                        time.sleep(5) # Wait for JS
-                        
-                        html = driver.page_source
-                        soup = BeautifulSoup(html, "html.parser")
-                        
-                        # Fallback Selector Strategy
-                        body_div = soup.select_one("div.content.content-wrap div.inside.ntext div.body")
-                        if not body_div: body_div = soup.select_one("div.body")
-                        if not body_div: body_div = soup.find("body")
+            # ID EXTRACTION LOGIC
+            dash_pattern = r"\b[A-Z0-9]{6}-\d{2}-[A-Z0-9]-\d{4}\b"
+            continuous_pattern = r"\b[A-Z0-9]{6}\d{2}[A-Z0-9]\d{4}\b"
+            combined_pattern = f"{dash_pattern}|{continuous_pattern}"
 
-                        if body_div:
-                            paragraphs = body_div.find_all("p")
-                            
-                            for p_index, p in enumerate(paragraphs):
-                                text = p.get_text(" ", strip=True)
-                                
-                                # --- UPDATED MATCHING LOGIC ---
-                                # 1. Normalize the paragraph text (remove dashes temporary for check)
-                                clean_text = normalize_id(text)
-                                
-                                # 2. Check if any of our target IDs exist in this paragraph
-                                # We check if the 'clean' ID is inside the 'clean' paragraph text
-                                found_matches = []
-                                for clean_id, original_id in normalized_id_map.items():
-                                    if clean_id in clean_text:
-                                        found_matches.append(original_id)
-                                
-                                if found_matches:
-                                    header = detect_header(p_index, paragraphs)
-                                    scraped_data.append({
-                                        "URL": url,
-                                        "Contract_Date": current_date,
-                                        "Header": header,
-                                        "Matched_IDs": found_matches, 
-                                        "Paragraph_Text": text
-                                    })
-                        else:
-                            status_container.write(f"⚠️ Warning: No content found on {url}")
-
-                    except Exception as e:
-                        status_container.write(f"⚠️ Error on {url}: {e}")
-                
-                driver.quit()
-                status_container.update(label="Scraping Complete!", state="complete", expanded=False)
-                
-                # Processing Results
-                expanded_rows = []
-                for row in scraped_data:
-                    num_ids = len(row["Matched_IDs"])
-                    if num_ids > 1:
-                        combined_ids = ", ".join(row["Matched_IDs"])
-                        expanded_rows.append({
-                            "Source Link(s)": row["URL"],
-                            "Contract Date": row["Contract_Date"],
-                            "Header": row["Header"],
-                            "Matched_ID": combined_ids,
-                            "Description of Contract": row["Paragraph_Text"],
-                            "Supplier Name": "Multiple" 
-                        })
-                    else:
-                        expanded_rows.append({
-                            "Source Link(s)": row["URL"],
-                            "Contract Date": row["Contract_Date"],
-                            "Header": row["Header"],
-                            "Matched_ID": row["Matched_IDs"][0],
-                            "Description of Contract": row["Paragraph_Text"],
-                            "Supplier Name": np.nan 
-                        })
-                
-                st.session_state.scraped_df = pd.DataFrame(expanded_rows)
-                if not st.session_state.scraped_df.empty:
-                    st.session_state.scraped_df['Contract Date'] = pd.to_datetime(st.session_state.scraped_df['Contract Date']).dt.date
+            extracted_ids = []
+            if 'Contract Description' in df_source.columns:
+                for text in df_source['Contract Description'].astype(str):
+                    match_ids = re.findall(combined_pattern, text)
+                    extracted_ids.append(match_ids)
             
+            flat_ids = sorted(list(set([cid for sub in extracted_ids for cid in sub])))
+            
+            with col3:
+                st.metric("Extracted Contract IDs", len(flat_ids))
+
+            with st.expander("🔍 View Extracted IDs"):
+                if len(flat_ids) > 0:
+                    st.write(flat_ids)
+                else:
+                    st.warning("No IDs extracted. Scraper will rely only on URLs.")
+                
         except Exception as e:
-            st.error(f"Critical Scraper Error: {e}")
+            st.error(f"Error processing file: {e}")
+            st.stop()
 
-    if st.session_state.scraped_df is not None:
-        st.success(f"Successfully scraped {len(st.session_state.scraped_df)} relevant records.")
-        st.dataframe(st.session_state.scraped_df, use_container_width=True)
         st.divider()
 
-        # ==========================================================
-        # PHASE 3: RAG PROCESSING
-        # ==========================================================
-        st.header("3. AI Intelligence Processor")
+        # 2. SCRAPER
+        st.subheader("2. Live Scraping Execution")
         
-        if not IMPORTS_LOADED:
-            st.warning("⚠️ RAG modules (src folder) not found.")
-        elif not formatted_api_key:
-            st.warning("⚠️ Please enter LLM Foundry Token in sidebar to start.")
-        else:
-            col_rag_1, col_rag_2 = st.columns([1, 3])
-            with col_rag_1:
-                start_rag = st.button("🧠 Start AI Processing", type="primary")
+        col_a, col_b = st.columns([1, 3])
+        with col_a:
+            start_scrape = st.button("🚀 Launch Scraper", type="primary")
+
+        if start_scrape:
+            status_container = st.status("Initializing Browser...", expanded=True)
+            progress_bar = st.progress(0)
             
-            if start_rag:
-                rag_status = st.status("Loading Vector DB...", expanded=True)
-                rag_progress = st.progress(0)
+            try:
+                url_date_map = df_source.set_index('Source URL')['Contract Date'].to_dict()
+                urls = df_source['Source URL'].dropna().unique().tolist()
                 
-                try:
-                    rag_db = DefenseVectorDB(persist_dir="./db_storage", api_key=formatted_api_key)
+                driver = get_driver()
+                
+                if driver:
+                    scraped_data = []
+                    normalized_id_map = {normalize_id(cid): cid for cid in flat_ids}
                     
-                    df_to_process = st.session_state.scraped_df
-                    results = []
-                    total_rows = len(df_to_process)
-                    
-                    for idx, row in df_to_process.iterrows():
-                        rag_status.write(f"🤖 Analyzing Record {idx + 1}/{total_rows}")
-                        rag_progress.progress((idx + 1) / total_rows)
+                    for idx, url in enumerate(urls):
+                        status_container.write(f"🌍 Visiting [{idx+1}/{len(urls)}]: {url}")
+                        progress_bar.progress((idx + 1) / len(urls))
                         
-                        desc = str(row.get("Description of Contract", ""))
-                        c_date = str(row.get("Contract Date", ""))
-                        pre_supplier = str(row.get("Supplier Name", ""))
+                        current_date = url_date_map.get(url)
                         
                         try:
-                            # 1. Classify
-                            res = classify_full_record_rag(desc, c_date, rag_db)
+                            driver.get(url)
+                            time.sleep(5) 
                             
-                            # 2. Validate
-                            try:
-                                res = run_all_validations(res, desc)
-                            except:
-                                pass
+                            html = driver.page_source
+                            soup = BeautifulSoup(html, "html.parser")
                             
-                            # 3. Override
-                            if pre_supplier == "Multiple":
-                                res["Supplier Name"] = "Multiple"
+                            # Fallback Selector
+                            body_div = soup.select_one("div.content.content-wrap div.inside.ntext div.body")
+                            if not body_div: body_div = soup.select_one("div.body")
+                            if not body_div: body_div = soup.find("body")
 
-                            # 4. Standardize
-                            if "Value (Million)" in res:
-                                res["Value (USD$ Million)"] = res["Value (Million)"]
-                            
-                            # 5. Metadata
-                            res["Description of Contract"] = desc
-                            res["Contract Date"] = c_date
-                            res["Source Link(s)"] = row.get("Source Link(s)", "")
-                            res["Header"] = row.get("Header", "")
-                            res["Matched_ID"] = row.get("Matched_ID", "")
-                            
-                            results.append(res)
-                            
+                            if body_div:
+                                paragraphs = body_div.find_all("p")
+                                
+                                for p_index, p in enumerate(paragraphs):
+                                    text = p.get_text(" ", strip=True)
+                                    clean_text = normalize_id(text)
+                                    
+                                    found_matches = []
+                                    for clean_id, original_id in normalized_id_map.items():
+                                        if clean_id in clean_text:
+                                            found_matches.append(original_id)
+                                    
+                                    if found_matches:
+                                        header = detect_header(p_index, paragraphs)
+                                        scraped_data.append({
+                                            "URL": url,
+                                            "Contract_Date": current_date,
+                                            "Header": header,
+                                            "Matched_IDs": found_matches, 
+                                            "Paragraph_Text": text
+                                        })
+                            else:
+                                status_container.write(f"⚠️ Warning: No content found on {url}")
+
                         except Exception as e:
-                            rag_status.write(f"❌ Error on row {idx}: {e}")
-                            results.append({"Description of Contract": desc, "Error": str(e)})
+                            status_container.write(f"⚠️ Error on {url}: {e}")
                     
-                    rag_status.update(label="AI Processing Complete!", state="complete", expanded=False)
+                    driver.quit()
+                    status_container.update(label="Scraping Complete!", state="complete", expanded=False)
                     
-                    processed_df = pd.DataFrame(results)
-                    for col in TARGET_COLUMNS:
-                        if col not in processed_df.columns:
-                            processed_df[col] = ""
+                    # Process Results
+                    expanded_rows = []
+                    for row in scraped_data:
+                        num_ids = len(row["Matched_IDs"])
+                        if num_ids > 1:
+                            combined_ids = ", ".join(row["Matched_IDs"])
+                            expanded_rows.append({
+                                "Source Link(s)": row["URL"],
+                                "Contract Date": row["Contract_Date"],
+                                "Header": row["Header"],
+                                "Matched_ID": combined_ids,
+                                "Description of Contract": row["Paragraph_Text"],
+                                "Supplier Name": "Multiple" 
+                            })
+                        else:
+                            expanded_rows.append({
+                                "Source Link(s)": row["URL"],
+                                "Contract Date": row["Contract_Date"],
+                                "Header": row["Header"],
+                                "Matched_ID": row["Matched_IDs"][0],
+                                "Description of Contract": row["Paragraph_Text"],
+                                "Supplier Name": np.nan 
+                            })
                     
-                    st.session_state.final_df = processed_df[TARGET_COLUMNS]
-                    
-                except Exception as e:
-                    st.error(f"RAG Pipeline Error: {e}")
+                    st.session_state.scraped_df = pd.DataFrame(expanded_rows)
+                    if not st.session_state.scraped_df.empty:
+                        st.session_state.scraped_df['Contract Date'] = pd.to_datetime(st.session_state.scraped_df['Contract Date']).dt.date
+                
+            except Exception as e:
+                st.error(f"Critical Scraper Error: {e}")
 
-        # ==========================================================
-        # PHASE 4: EXPORT
-        # ==========================================================
-        if st.session_state.final_df is not None:
-            st.header("4. Final Intelligence Report")
-            st.dataframe(st.session_state.final_df, use_container_width=True)
+        if st.session_state.scraped_df is not None:
+            st.success(f"Successfully scraped {len(st.session_state.scraped_df)} relevant records.")
+            st.dataframe(st.session_state.scraped_df, use_container_width=True)
+            st.divider()
+
+            # 3. AI PROCESSING
+            st.subheader("3. AI Intelligence Processor")
             
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                st.session_state.final_df.to_excel(writer, index=False, sheet_name='Defense_Contracts')
-            
-            st.download_button(
-                label="📥 Download Final Excel Report",
-                data=output.getvalue(),
-                file_name="Final_Defense_Contracts_Analyzed.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-else:
-    st.info("👋 Please upload an Excel file to begin.")
+            if not IMPORTS_LOADED:
+                st.warning("⚠️ RAG modules (src folder) not found.")
+            elif not formatted_api_key:
+                st.warning("⚠️ Please enter LLM Foundry Token in sidebar to start.")
+            else:
+                col_rag_1, col_rag_2 = st.columns([1, 3])
+                with col_rag_1:
+                    start_rag = st.button("🧠 Start AI Processing", type="primary")
+                
+                if start_rag:
+                    rag_status = st.status("Initializing Analyst Memory...", expanded=True)
+                    rag_progress = st.progress(0)
+                    
+                    try:
+                        df_to_process = st.session_state.scraped_df
+                        results = []
+                        total_rows = len(df_to_process)
+                        
+                        for idx, row in df_to_process.iterrows():
+                            rag_status.write(f"🤖 Analyzing Record {idx + 1}/{total_rows}")
+                            rag_progress.progress((idx + 1) / total_rows)
+                            
+                            desc = str(row.get("Description of Contract", ""))
+                            c_date = str(row.get("Contract Date", ""))
+                            pre_supplier = str(row.get("Supplier Name", ""))
+                            
+                            try:
+                                # 1. CLASSIFY WITH MEMORY
+                                res = classify_record_with_memory(desc, c_date)
+                                
+                                # 2. VALIDATE
+                                try:
+                                    res = run_all_validations(res, desc)
+                                except:
+                                    pass
+                                
+                                # 3. OVERRIDES & STANDARDIZATION
+                                if pre_supplier == "Multiple":
+                                    res["Supplier Name"] = "Multiple"
+
+                                if "Value (Million)" in res:
+                                    res["Value (USD$ Million)"] = res["Value (Million)"]
+                                
+                                # 4. METADATA MAPPING
+                                res["Description of Contract"] = desc
+                                res["Contract Date"] = c_date
+                                res["Source Link(s)"] = row.get("Source Link(s)", "")
+                                res["Header"] = row.get("Header", "")
+                                res["Value Note (If Any)"] = "" # Placeholder
+                                res["Reported Date (By SGA)"] = datetime.datetime.now().strftime("%Y-%m-%d")
+                                
+                                results.append(res)
+                                
+                            except Exception as e:
+                                rag_status.write(f"❌ Error on row {idx}: {e}")
+                                results.append({"Description of Contract": desc, "Additional Notes (Internal Only)": str(e)})
+                        
+                        rag_status.update(label="AI Processing Complete!", state="complete", expanded=False)
+                        
+                        processed_df = pd.DataFrame(results)
+                        
+                        # Ensure all columns exist
+                        for col in TARGET_COLUMNS:
+                            if col not in processed_df.columns:
+                                processed_df[col] = ""
+                        
+                        st.session_state.final_df = processed_df[TARGET_COLUMNS]
+                        
+                    except Exception as e:
+                        st.error(f"Pipeline Error: {e}")
+
+            # 4. EXPORT
+            if st.session_state.final_df is not None:
+                st.subheader("4. Final Intelligence Report")
+                st.dataframe(st.session_state.final_df, use_container_width=True)
+                
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    st.session_state.final_df.to_excel(writer, index=False, sheet_name='Defense_Contracts')
+                
+                st.download_button(
+                    label="📥 Download Final Excel Report",
+                    data=output.getvalue(),
+                    file_name="Final_Defense_Contracts_Analyzed.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+
+# ==========================================================
+# TAB 2: LIVE DEMO
+# ==========================================================
+with tab_demo:
+    st.header("🧪 Live Analyst Demo")
+    st.info("Test the new 'Memory' logic on a single paragraph. No scraper required.")
+
+    if not formatted_api_key:
+        st.error("🔒 Please enter your LLM Token in the Sidebar first.")
+    else:
+        col_input, col_meta = st.columns([3, 1])
+        
+        with col_input:
+            demo_text = st.text_area("Paste Contract Text Here:", height=200, 
+                                     placeholder="e.g., Jacobs/HDR JV... awarded $90M contract for architect-engineer services...")
+        
+        with col_meta:
+            # FIXED: datetime import is now available
+            demo_date = st.date_input("Contract Date", value=datetime.date.today())
+            run_demo = st.button("⚡ Analyze Text", type="primary")
+
+        if run_demo and demo_text:
+            with st.spinner("Consulting Analyst Memory & Taxonomy..."):
+                try:
+                    # 1. Run Classification
+                    date_str = demo_date.strftime("%Y-%m-%d")
+                    demo_result = classify_record_with_memory(demo_text, date_str)
+                    
+                    # 2. Run Validation
+                    demo_result = run_all_validations(demo_result, demo_text)
+                    
+                    # 3. Add Missing Columns for Display
+                    demo_result["Contract Date"] = date_str
+                    demo_result["Description of Contract"] = demo_text
+                    
+                    # Display as JSON
+                    st.subheader("Raw JSON Output")
+                    st.json(demo_result)
+                    
+                    # Display as Table (Transposed for readability)
+                    st.subheader("Structured Data")
+                    
+                    # Create DataFrame with TARGET COLUMNS order
+                    display_data = {k: demo_result.get(k, "") for k in TARGET_COLUMNS}
+                    df_demo = pd.DataFrame([display_data]).transpose()
+                    df_demo.columns = ["Extracted Value"]
+                    st.dataframe(df_demo, height=800, use_container_width=True)
+
+                except Exception as e:
+                    st.error(f"Analysis Failed: {e}")

@@ -4,55 +4,62 @@ import time
 import pandas as pd
 import re
 import difflib
-import os 
+import os
 from dateutil import parser
 from dateutil.relativedelta import relativedelta
-from sentence_transformers import CrossEncoder
-from openai import OpenAI  # Added this import
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from openai import OpenAI
 
 # Imports from other files
-# FIXED: Removed get_api_client, Added BASE_URL
-from config import MODEL_NAME, BASE_URL 
+from config import MODEL_NAME, BASE_URL
 from data.taxonomy import (
-    TAXONOMY_STR, VALID_DEPENDENCIES, GEOGRAPHY_MAPPING, 
+    TAXONOMY_STR, VALID_DEPENDENCIES, GEOGRAPHY_MAPPING,
     VALID_OPERATORS, SUPPLIER_LIST, PROGRAM_TYPES, DOMESTIC_CONTENT_OPTIONS
 )
 from src.prompts import (
-    RAG_CLASSIFICATION_PROMPT, SYSTEM_NAME_PROMPT, SYSTEM_PILOTING_PROMPT,
     GEOGRAPHY_PROMPT, FINANCIAL_PROMPT, DOMESTIC_CONTENT_PROMPT
+    # RAG_CLASSIFICATION_PROMPT, SYSTEM_NAME_PROMPT, SYSTEM_PILOTING_PROMPT 
+    # (Note: The above prompts are replaced by the new dynamic prompt logic)
 )
 
 # ==========================================
-# 0. INITIALIZE RE-RANKER (GLOBAL)
+# 0. INITIALIZE TF-IDF MEMORY (NEW LOGIC)
 # ==========================================
-# LOGIC UPDATE: Try Online -> Fail -> Try Local Folder
-LOCAL_MODEL_PATH = r"C:\Users\mukeshkr\Desktop\DefenseExtraction\model"
+# Update this path to where your Excel file is located.
+# If running locally, you might need: r"C:\path\to\Market Segment.xlsx"
+REFERENCE_FILE_PATH = r"C:\Users\mukeshkr\Desktop\DefenseExtraction\Market Segment.xlsx" 
 
-print("Loading Cross-Encoder Re-Ranker model...")
+print("Loading Reference Examples for Memory...")
+vectorizer = None
+example_vectors = None
+df_examples = None
+
 try:
-    # 1. Try downloading/loading from Hugging Face Hub
-    print("Attempting to download model from Hugging Face...")
-    RERANKER_MODEL = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
-    print("Success: Re-Ranker loaded from Hugging Face Hub.")
-except Exception as e_hub:
-    print(f" > Could not download from Hub ({e_hub}).")
-    print(f" > Switching to local path: {LOCAL_MODEL_PATH}")
-    
-    try:
-        # 2. Try loading from your local folder
-        if os.path.exists(LOCAL_MODEL_PATH):
-            RERANKER_MODEL = CrossEncoder(LOCAL_MODEL_PATH)
-            print(f"Success: Re-Ranker loaded from local path.")
+    if os.path.exists(REFERENCE_FILE_PATH):
+        df_examples = pd.read_excel(REFERENCE_FILE_PATH)
+        # Ensure text column exists and treat as string
+        if 'Description of Contract' in df_examples.columns:
+            vectorizer = TfidfVectorizer(stop_words='english')
+            example_vectors = vectorizer.fit_transform(df_examples['Description of Contract'].astype(str))
+            print("Success: Memory loaded with TF-IDF Vectorizer.")
         else:
-            print(f"Error: Local model folder not found at: {LOCAL_MODEL_PATH}")
-            RERANKER_MODEL = None
-            
-    except Exception as e_local:
-        print(f"CRITICAL WARNING: Could not load Re-Ranker from Local path. Error: {e_local}")
-        RERANKER_MODEL = None
+            print(f"Warning: Column 'Description of Contract' not found in {REFERENCE_FILE_PATH}")
+    else:
+        # Fallback for local testing if file isn't at /content/
+        local_fallback = "Market Segment.xlsx"
+        if os.path.exists(local_fallback):
+            df_examples = pd.read_excel(local_fallback)
+            vectorizer = TfidfVectorizer(stop_words='english')
+            example_vectors = vectorizer.fit_transform(df_examples['Description of Contract'].astype(str))
+            print(f"Success: Memory loaded from local fallback '{local_fallback}'.")
+        else:
+            print(f"Warning: Reference file not found at {REFERENCE_FILE_PATH} or {local_fallback}. Memory disabled.")
+except Exception as e:
+    print(f"CRITICAL WARNING: Could not load Reference File. Error: {e}")
 
 # ==========================================
-# 1. HYBRID TAXONOMY MATCHING LOGIC
+# 1. HELPER FUNCTIONS
 # ==========================================
 
 SORTED_SUPPLIER_LIST = sorted(SUPPLIER_LIST, key=len, reverse=True)
@@ -90,21 +97,16 @@ def get_best_taxonomy_match(extracted_name: str) -> str:
 
     return clean_name
 
-# ==========================================
-# 2. HELPER FUNCTIONS
-# ==========================================
-
-def call_llm(prompt_text: str) -> dict:
-    time.sleep(1) 
+def call_llm(prompt_text: str, system_message: str = "You are a helpful assistant. Please respond in JSON format.") -> dict:
+    time.sleep(0.5) 
     try:
-        # FIXED: Initialize Client HERE, not globally.
-        # This picks up the API Key set in Streamlit's os.environ at runtime.
+        # Initialize Client using config
         client = OpenAI(base_url=BASE_URL)
         
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant. Please respond in JSON format."},
+                {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt_text}
             ],
             temperature=0,
@@ -115,23 +117,38 @@ def call_llm(prompt_text: str) -> dict:
     except Exception as e:
         print(f"LLM Call Error: {e}")
         return {}
-    
 
-def validate_and_fix(result: dict) -> dict:
-    ms = result.get("Market Segment", "Unknown")
-    stg = result.get("System Type (General)", "Not Applicable")
-    sts = result.get("System Type (Specific)", "Not Applicable")
+def get_similar_example(new_text):
+    """
+    Finds the single most similar contract from the analyst file using TF-IDF.
+    Returns the text and the correct classification.
+    """
+    if vectorizer is None or df_examples is None:
+        return None
 
-    if ms not in VALID_DEPENDENCIES:
-        return {"Market Segment": "Unknown", "System Type (General)": "Not Applicable", "System Type (Specific)": "Not Applicable"}
+    try:
+        new_vec = vectorizer.transform([new_text])
+        similarities = cosine_similarity(new_vec, example_vectors).flatten()
+        best_idx = similarities.argmax()
 
-    if stg not in VALID_DEPENDENCIES[ms]:
-        if ms == "C4ISR Systems":
-            return {"Market Segment": ms, "System Type (General)": "Integrated C4ISR System", "System Type (Specific)": "Integrated C4ISR System"}
-        else:
-            return {"Market Segment": ms, "System Type (General)": "Not Applicable", "System Type (Specific)": "Not Applicable"}
-
-    return {"Market Segment": ms, "System Type (General)": stg, "System Type (Specific)": sts}
+        # Only use example if it's somewhat similar (score > 0.1)
+        if similarities[best_idx] > 0.1:
+            row = df_examples.iloc[best_idx]
+            return {
+                "text": row['Description of Contract'],
+                "classification": {
+                    "Market Segment": row['Market Segment'],
+                    "System Type (General)": row['System Type (General)'],
+                    "System Type (Specific)": row['System Type (Specific)'],
+                    "System Name (General)": row['System Name (General)'],
+                    "System Name (Specific)": row['System Name (Specific)'],
+                    "System Piloting": row.get('System Piloting', "Derived from logic")
+                }
+            }
+    except Exception as e:
+        print(f"Error finding similar example: {e}")
+        
+    return None
 
 def calculate_derived_fields(financial_data: dict, geo_data: dict, description: str, contract_date_str: str) -> dict:
     try:
@@ -195,58 +212,73 @@ def calculate_derived_fields(financial_data: dict, geo_data: dict, description: 
     }
 
 # ==========================================
-# 3. MAIN RAG PIPELINE
+# 2. MAIN PROCESSOR (UPDATED LOGIC)
 # ==========================================
 
-def classify_full_record_rag(description: str, contract_date_str: str, vector_db) -> dict:
+def classify_record_with_memory(description: str, contract_date_str: str) -> dict:
+    """
+    Main entry point for processing a single row.
+    Integrates:
+    1. New 'Memory' Logic for Classification, Naming, Piloting.
+    2. Existing Logic for Geography, Domestic Content, Financials.
+    """
     
-    # 1. RETRIEVE CONTEXT
-    raw_similar_docs = vector_db.search_context(description, k=10)
+    # --- A. NEW CLASSIFICATION LOGIC (Market Segment, Systems, Piloting) ---
     
-    # --- RE-RANKING LOGIC ---
-    if raw_similar_docs and RERANKER_MODEL:
-        try:
-            pairs = [[description, doc.page_content] for doc in raw_similar_docs]
-            scores = RERANKER_MODEL.predict(pairs)
-            
-            scored_docs = []
-            for doc, score in zip(raw_similar_docs, scores):
-                doc.metadata["rerank_score"] = float(score)
-                scored_docs.append((doc, score))
-            
-            scored_docs.sort(key=lambda x: x[1], reverse=True)
-            top_docs = [item[0] for item in scored_docs[:3]]
-            
-        except Exception as e:
-            print(f"Re-ranking failed: {e}. Falling back to vector order.")
-            top_docs = raw_similar_docs[:3]
-    else:
-        top_docs = raw_similar_docs[:3]
-    # ------------------------
+    # 1. Find a similar past case
+    similar_case = get_similar_example(description)
 
-    # Construct Context String
-    context_str = ""
-    if top_docs:
-        context_str = "Below are examples of how similar contracts were classified previously (Ranked by Relevance):\n"
-        for i, doc in enumerate(top_docs):
-            past_segment = doc.metadata.get("Market Segment", "Unknown")
-            past_general = doc.metadata.get("System Type (General)", "Unknown")
-            snippet = doc.page_content[:200].replace("\n", " ") 
-            context_str += f"{i+1}. TEXT: \"{snippet}...\" -> CLASSIFICATION: {past_segment} / {past_general}\n"
-    else:
-        context_str = "No similar past contracts found (Cold Start)."
+    # 2. Construct the dynamic prompt
+    system_instruction = f"""
+    You are a Defense Contract Analyst.
+    Your goal is to extract technical data points from the "Input Text".
 
-    # 2. CLASSIFY SYSTEM (RAG)
-    classify_prompt = RAG_CLASSIFICATION_PROMPT.format(
-        context=context_str,
-        taxonomy=TAXONOMY_STR,
-        text=description
-    )
-    # Lazy init of client happens inside this call now
-    raw_class_result = call_llm(classify_prompt)
-    base_result = validate_and_fix(raw_class_result)
+    REFERENCE TAXONOMY:
+    {TAXONOMY_STR}
+    """
 
-    # 3. GEOGRAPHY
+    user_message = f"Input Text: {description}\n\n"
+
+    # Inject the "One-Shot" Example if found
+    if similar_case:
+        user_message += f"""
+        IMPORTANT REFERENCE - Here is a similar contract classified by a human analyst.
+        Use this as a guide for your logic:
+
+        [Past Input]: {similar_case['text'][:300]}...
+        [Past Correct Output]: {json.dumps(similar_case['classification'])}
+
+        Now, apply the same logic to the current Input Text.
+        """
+
+    # 3. Add Instructions for Naming & Piloting
+    user_message += """
+    --------------------------------------------------------
+    REQUIREMENTS:
+    1. Classify 'Market Segment', 'System Type (General)', 'System Type (Specific)' using the Taxonomy.
+    2. Extract 'System Name (Specific)' (e.g., MC-130J) and 'System Name (General)' (e.g., C-130).
+    3. Determine 'System Piloting' (Crewed, Uncrewed, or Not Applicable).
+       - Software/Services/Ammo/Infra = "Not Applicable".
+       - Manned Vehicles = "Crewed".
+       - Drones/Satellites = "Uncrewed".
+
+    Return JSON only with these exact keys:
+    {
+        "Market Segment": "...",
+        "System Type (General)": "...",
+        "System Type (Specific)": "...",
+        "System Name (General)": "...",
+        "System Name (Specific)": "...",
+        "System Piloting": "..."
+    }
+    """
+
+    # 4. Call LLM for Classification
+    class_result = call_llm(user_message, system_instruction)
+
+    # --- B. EXISTING LOGIC (Geography, Domestic, Financials) ---
+
+    # 1. GEOGRAPHY
     geo_json_str = json.dumps(GEOGRAPHY_MAPPING)
     geo_prompt = GEOGRAPHY_PROMPT.format(
         operators=VALID_OPERATORS, 
@@ -255,7 +287,7 @@ def classify_full_record_rag(description: str, contract_date_str: str, vector_db
     )
     geo_result = call_llm(geo_prompt)
 
-    # 4. DOMESTIC CONTENT
+    # 2. DOMESTIC CONTENT
     cust_c = geo_result.get("Customer Country", "Unknown")
     supp_c = geo_result.get("Supplier Country", "Unknown")
     
@@ -275,10 +307,7 @@ def classify_full_record_rag(description: str, contract_date_str: str, vector_db
         dom_val = "Imported"
     dom_result = {"Domestic Content": dom_val}
 
-    # 5. OTHER EXTRACTIONS
-    name_result = call_llm(SYSTEM_NAME_PROMPT.format(text=description))
-    piloting_result = call_llm(SYSTEM_PILOTING_PROMPT.format(text=description))
-    
+    # 3. FINANCIALS
     fin_prompt = FINANCIAL_PROMPT.format(
         program_types=PROGRAM_TYPES, 
         supplier_list=", ".join(SUPPLIER_LIST), 
@@ -286,29 +315,21 @@ def classify_full_record_rag(description: str, contract_date_str: str, vector_db
     )
     fin_result_raw = call_llm(fin_prompt)
 
-    # Strict Supplier Match
+    # Strict Supplier Match logic
     raw_llm_supplier = fin_result_raw.get("Supplier Name", "Unknown")
     matched_taxonomy_name = get_best_taxonomy_match(raw_llm_supplier)
     fin_result_raw["Supplier Name"] = matched_taxonomy_name
 
-    # 6. DERIVED FIELDS
+    # 4. DERIVED FIELDS calculation
     derived_result = calculate_derived_fields(fin_result_raw, geo_result, description, contract_date_str)
 
-    # 7. COMBINE ALL
+    # --- C. MERGE ALL RESULTS ---
+    
     final_output = {
-        **base_result, 
-        **name_result, 
-        **piloting_result, 
-        **geo_result, 
-        **dom_result,
-        **derived_result
+        **class_result,   # New Logic (Segment, Systems, Names, Piloting)
+        **geo_result,     # Existing Logic
+        **dom_result,     # Existing Logic
+        **derived_result  # Existing Logic (Financials + Derived)
     }
-
-    # 8. SAVE TO MEMORY
-    metadata_to_save = {
-        "Market Segment": final_output.get("Market Segment"),
-        "System Type (General)": final_output.get("System Type (General)")
-    }
-    vector_db.add_contract(description, metadata_to_save)
 
     return final_output
