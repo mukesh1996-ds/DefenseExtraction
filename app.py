@@ -31,7 +31,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- IMPORT HANDLING (WITH DEBUGGING) ---
+# --- IMPORT HANDLING ---
 try:
     try:
         from config import PROJECT_ID
@@ -67,6 +67,7 @@ if 'final_df' not in st.session_state:
 
 # --- HELPER FUNCTIONS ---
 def detect_header(paragraph_index, all_paragraphs):
+    # Search backwards for the nearest Header/Strong tag
     for i in range(paragraph_index, -1, -1):
         p = all_paragraphs[i]
         strong_tag = p.find("strong")
@@ -79,13 +80,22 @@ def normalize_id(id_str):
     return str(id_str).replace("-", "").strip().upper()
 
 def get_driver():
+    """Robust Driver Configuration for Cloud Environments"""
     if sys.platform == "linux":
         options = ChromeOptions()
-        options.add_argument("--headless")
+        # Essential Headless Flags
+        options.add_argument("--headless=new") # Newer headless mode
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--window-size=1920,1080")
+        options.add_argument("--start-maximized")
+        
+        # Anti-Detection Flags (CRITICAL FOR CLOUD)
+        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
         
         chromium_path = shutil.which("chromium") or "/usr/bin/chromium"
         options.binary_location = chromium_path
@@ -94,7 +104,7 @@ def get_driver():
         service = ChromeService(driver_path)
         return webdriver.Chrome(service=service, options=options)
     else:
-        # Local Edge Driver
+        # Local Driver (Edge)
         driver_path = "driver/msedgedriver.exe" 
         if os.path.exists(driver_path):
             service = EdgeService(driver_path)
@@ -126,19 +136,13 @@ def create_dashboard_metrics(df):
     return fig_pie, fig_bar
 
 def save_memory():
-    """Saves uploaded memory file with robustness for Cloud paths."""
     uploaded = st.session_state.mem_uploader
     if uploaded:
         try:
-            # 1. Save to root directory
             with open("Market Segment.xlsx", "wb") as f:
                 f.write(uploaded.getbuffer())
-            
-            # 2. Ensure 'src' directory exists (Crucial for Cloud)
             if not os.path.exists("src"):
                 os.makedirs("src")
-            
-            # 3. Copy to src
             shutil.copy("Market Segment.xlsx", "src/Market Segment.xlsx")
             st.toast("✅ Memory Loaded!", icon="💾")
         except Exception as e:
@@ -163,11 +167,7 @@ with st.sidebar:
     mem_exists = os.path.exists("Market Segment.xlsx")
     
     if mem_exists:
-        try:
-            df_mem = pd.read_excel("Market Segment.xlsx")
-            st.markdown(f"<span style='color:green; font-weight:bold'>✅ Loaded ({len(df_mem)} rules)</span>", unsafe_allow_html=True)
-        except:
-            st.error("File Corrupted")
+        st.markdown(f"<span style='color:green; font-weight:bold'>✅ Loaded</span>", unsafe_allow_html=True)
     else:
         st.markdown("<span style='color:red; font-weight:bold'>❌ Missing</span>", unsafe_allow_html=True)
         st.file_uploader("Upload 'Market Segment.xlsx'", type=['xlsx'], key="mem_uploader", on_change=save_memory)
@@ -202,69 +202,114 @@ with tab_batch:
             status_box = st.status("📡 Scraping in progress...", expanded=True)
             try:
                 # --- SCRAPER LOGIC START ---
-                url_date_map = df_source.set_index('Source URL')['Contract Date'].to_dict()
-                urls = df_source['Source URL'].dropna().unique().tolist()
-                driver = get_driver()
                 
-                scraped_data = []
-                # ID Extraction
+                # 1. Prepare Target IDs
+                urls = df_source['Source URL'].dropna().unique().tolist()
+                
+                # Extract IDs from Input Excel
                 dash_pattern = r"\b[A-Z0-9]{6}-\d{2}-[A-Z0-9]-\d{4}\b"
                 continuous_pattern = r"\b[A-Z0-9]{6}\d{2}[A-Z0-9]\d{4}\b"
                 combined_pattern = f"{dash_pattern}|{continuous_pattern}"
+                
                 extracted_ids = []
                 if 'Contract Description' in df_source.columns:
                     for text in df_source['Contract Description'].astype(str):
                         extracted_ids.append(re.findall(combined_pattern, text))
+                
                 flat_ids = sorted(list(set([cid for sub in extracted_ids for cid in sub])))
                 normalized_id_map = {normalize_id(cid): cid for cid in flat_ids}
+                
+                if not flat_ids:
+                    status_box.write("⚠️ Warning: No Contract IDs found in your input Excel 'Contract Description' column.")
+                    status_box.update(state="error")
+                else:
+                    status_box.write(f"ℹ️ Searching for {len(flat_ids)} unique Contract IDs...")
+
+                # 2. Launch Driver
+                driver = get_driver()
+                scraped_data = []
 
                 for idx, url in enumerate(urls):
                     status_box.write(f"Scanning: {url}")
                     try:
                         driver.get(url)
-                        time.sleep(2)
+                        # Increased wait time for Cloud latency
+                        time.sleep(5) 
+                        
                         html = driver.page_source
                         soup = BeautifulSoup(html, "html.parser")
-                        body_div = soup.select_one("div.content.content-wrap div.inside.ntext div.body") or soup.select_one("div.body") or soup.find("body")
                         
-                        if body_div:
-                            for p_index, p in enumerate(body_div.find_all("p")):
-                                text = p.get_text(" ", strip=True)
-                                clean_text = normalize_id(text)
-                                found = [orig for cln, orig in normalized_id_map.items() if cln in clean_text]
-                                if found:
-                                    scraped_data.append({
-                                        "URL": url, "Contract_Date": url_date_map.get(url),
-                                        "Header": detect_header(p_index, body_div.find_all("p")),
-                                        "Matched_IDs": found, "Paragraph_Text": text
-                                    })
-                    except: pass
+                        # --- ROBUST FINDER (FIXED) ---
+                        # Instead of looking for specific DIVs, we look at ALL paragraphs on the page.
+                        all_paragraphs = soup.find_all("p")
+                        
+                        found_count_on_page = 0
+                        
+                        # Debugging: Check if we are blocked
+                        page_title = soup.title.string if soup.title else "No Title"
+                        if len(all_paragraphs) == 0:
+                             print(f"⚠️ [DEBUG] {url} - Empty Page or Blocked. Title: {page_title}")
+
+                        for p_index, p in enumerate(all_paragraphs):
+                            text = p.get_text(" ", strip=True)
+                            if not text: continue
+                                
+                            clean_text = normalize_id(text)
+                            
+                            # Check if any target ID is in this paragraph
+                            found = [orig for cln, orig in normalized_id_map.items() if cln in clean_text]
+                            
+                            if found:
+                                found_count_on_page += 1
+                                scraped_data.append({
+                                    "URL": url, 
+                                    "Contract_Date": df_source.loc[df_source['Source URL'] == url, 'Contract Date'].iloc[0] if 'Contract Date' in df_source.columns else None,
+                                    "Header": detect_header(p_index, all_paragraphs),
+                                    "Matched_IDs": found, 
+                                    "Paragraph_Text": text
+                                })
+                        
+                        if found_count_on_page > 0:
+                            status_box.write(f"✅ Found {found_count_on_page} matches on {url}")
+                        else:
+                            # Fallback: Print debug info to console logs if needed
+                            print(f"No matches on {url}. IDs searched: {len(flat_ids)}")
+                            
+                    except Exception as scrape_err:
+                        print(f"Failed to scrape {url}: {scrape_err}")
                 
                 driver.quit()
-                status_box.update(label="✅ Scraping Complete", state="complete", expanded=False)
                 
-                # Expand Rows
-                final_rows = []
-                for row in scraped_data:
-                    ids = row["Matched_IDs"]
-                    entry = {
-                        "Source Link(s)": row["URL"], "Contract Date": row["Contract_Date"],
-                        "Header": row["Header"], "Description of Contract": row["Paragraph_Text"],
-                        "Supplier Name": "Multiple" if len(ids) > 1 else np.nan,
-                        "Matched_ID": ", ".join(ids) if len(ids) > 1 else ids[0]
-                    }
-                    final_rows.append(entry)
-                
-                st.session_state.scraped_df = pd.DataFrame(final_rows)
-                if not st.session_state.scraped_df.empty:
-                    st.success(f"Acquired {len(st.session_state.scraped_df)} records.")
+                # 3. Process Results
+                if len(scraped_data) > 0:
+                    status_box.update(label=f"✅ Scraping Complete: Found {len(scraped_data)} records", state="complete", expanded=False)
+                    
+                    final_rows = []
+                    for row in scraped_data:
+                        ids = row["Matched_IDs"]
+                        entry = {
+                            "Source Link(s)": row["URL"], 
+                            "Contract Date": row["Contract_Date"],
+                            "Header": row["Header"], 
+                            "Description of Contract": row["Paragraph_Text"],
+                            "Supplier Name": "Multiple" if len(ids) > 1 else np.nan,
+                            "Matched_ID": ", ".join(ids) if len(ids) > 1 else ids[0]
+                        }
+                        final_rows.append(entry)
+                    
+                    st.session_state.scraped_df = pd.DataFrame(final_rows)
+                    st.success(f"Successfully acquired {len(st.session_state.scraped_df)} records.")
                     time.sleep(1)
-                    st.rerun() # Refresh to update UI
+                    st.rerun()
                 else:
-                    st.warning("Scraper finished but found no matching records.")
+                    st.session_state.scraped_df = None # Clear old data
+                    status_box.update(label="⚠️ Scraping Finished (No Data)", state="error")
+                    st.error("Scraper finished but found no matching records.")
+                    st.markdown("**Troubleshooting:**\n1. Check if your Input Excel has valid Contract IDs in 'Contract Description'.\n2. The website might be blocking the Cloud Scraper (Anti-Bot).")
+                
                 # --- SCRAPER LOGIC END ---
             except Exception as e:
-                st.error(f"Scraper Failed: {e}")
+                st.error(f"Scraper System Failure: {e}")
                 st.code(traceback.format_exc())
 
     # 3. AI PROCESSING
@@ -274,15 +319,6 @@ with tab_batch:
     # State Check
     has_data = st.session_state.scraped_df is not None and not st.session_state.scraped_df.empty
     
-    # DEBUG PANEL
-    with st.expander("🛠️ Debugging Info (Open if AI Fails)"):
-        st.write(f"**Modules Loaded:** {IMPORTS_LOADED}")
-        st.write(f"**API Key Set:** {'Yes' if formatted_api_key else 'No'}")
-        st.write(f"**Memory File Exists:** {os.path.exists('Market Segment.xlsx')}")
-        st.write(f"**Scraped Data Available:** {has_data}")
-        if has_data:
-            st.write(f"**Row Count:** {len(st.session_state.scraped_df)}")
-
     if not has_data:
         st.info("Waiting for Scraped Data...")
         proc_btn = st.button("🧠 Start AI Processor", disabled=True)
@@ -291,13 +327,12 @@ with tab_batch:
         
         if proc_btn:
             if not IMPORTS_LOADED:
-                st.error("⛔ STOP: Modules failed to import (Check Top of Page).")
+                st.error("⛔ STOP: Modules failed to import.")
             elif not formatted_api_key:
                 st.error("⛔ STOP: Missing LLM Foundry Token.")
             elif not os.path.exists("Market Segment.xlsx"):
                 st.error("⛔ STOP: Memory File Missing.")
             else:
-                # --- AI EXECUTION ---
                 st.write("Starting Pipeline...")
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -313,15 +348,12 @@ with tab_batch:
                         c_date = str(row.get("Contract Date", ""))
                         
                         try:
-                            # CALLING YOUR MODULES
                             res = classify_record_with_memory(desc, c_date) 
                             res = run_all_validations(res, desc)
                             res.update(row.to_dict())
                             res["Reported Date (By SGA)"] = datetime.datetime.now().strftime("%Y-%m-%d")
                             results.append(res)
                         except Exception as row_ex:
-                            # ROW LEVEL ERROR CATCHING
-                            print(f"Row {idx} Failed: {row_ex}")
                             traceback.print_exc()
                             results.append({
                                 "Description of Contract": desc, 
@@ -330,23 +362,16 @@ with tab_batch:
                         
                         progress_bar.progress((idx + 1) / len(df_in))
 
-                    # Finalize
                     st.session_state.final_df = pd.DataFrame(results)
-                    
-                    # Ensure columns exist
                     for col in TARGET_COLUMNS:
                         if col not in st.session_state.final_df.columns:
                             st.session_state.final_df[col] = ""
-                    
                     st.session_state.final_df = st.session_state.final_df[TARGET_COLUMNS]
                     
                     status_text.write("✅ Analysis Complete!")
-                    st.success("Analysis Finished Successfully.")
-                    
-                    # IMMEDIATE PREVIEW
+                    st.success("Analysis Finished.")
                     st.subheader("Results Preview")
                     st.dataframe(st.session_state.final_df.head())
-                    st.caption("Go to 'Dashboard & Export' tab for full view.")
                     
                 except Exception as e:
                     st.error(f"Pipeline Crashed: {e}")
@@ -358,26 +383,21 @@ with tab_batch:
 with tab_dashboard:
     if st.session_state.final_df is not None:
         df = st.session_state.final_df
-        
-        # Metrics
         c1, c2 = st.columns(2)
         total_val = pd.to_numeric(df["Value (USD$ Million)"], errors='coerce').sum()
         c1.metric("Total Value", f"${total_val:,.2f} M")
         c2.metric("Records", len(df))
         
-        # Charts
         p, b = create_dashboard_metrics(df)
         if p: st.plotly_chart(p, use_container_width=True)
         if b: st.plotly_chart(b, use_container_width=True)
         
-        # Data Editor
         st.subheader("Review Data")
         edited = st.data_editor(df, num_rows="dynamic", use_container_width=True, height=500)
         
-        # Export
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             edited.to_excel(writer, index=False, sheet_name='Defense_Contracts')
         st.download_button("📥 Download Excel", output.getvalue(), "Defense_Intel.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
-        st.info("No analysis results yet. Run the 'Intelligence Cycle' first.")
+        st.info("No analysis results yet.")
