@@ -189,6 +189,16 @@ def create_dashboard_metrics(df):
         
     return fig_pie, fig_bar
 
+def save_memory_file(uploaded_file):
+    """Saves the memory file to root and src folder to ensure detection."""
+    # 1. Save to Root
+    with open("Market Segment.xlsx", "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    
+    # 2. Copy to src/ if it exists (in case internal modules look there)
+    if os.path.exists("src"):
+        shutil.copy("Market Segment.xlsx", "src/Market Segment.xlsx")
+
 # --- SIDEBAR ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/2312/2312214.png", width=60)
@@ -216,20 +226,30 @@ with st.sidebar:
         st.markdown("❌ **RAG Core:** `Offline`")
         st.error("Missing `src` folder")
 
-    # Memory Check & Uploader
+    # --- MEMORY FILE HANDLING (FIXED) ---
     mem_path = "Market Segment.xlsx"
     mem_exists = os.path.exists(mem_path) or os.path.exists("/content/" + mem_path)
     
+    # Memory Status Indicator
     if mem_exists:
-        st.markdown("✅ **Analyst Memory:** `Loaded`")
+        try:
+            mem_df = pd.read_excel(mem_path)
+            st.markdown(f"✅ **Analyst Memory:** `Loaded ({len(mem_df)} Rules)`")
+        except:
+            st.markdown("⚠️ **Analyst Memory:** `Corrupt/Empty`")
+            mem_exists = False
     else:
-        st.markdown("⚠️ **Analyst Memory:** `Not Found`")
-        st.info("Upload 'Market Segment.xlsx' to enable advanced classification.")
-        uploaded_mem = st.file_uploader("Upload Memory File", type=['xlsx'], key="mem_upload")
+        st.markdown("⚠️ **Analyst Memory:** `Missing`")
+        
+    # Universal Uploader (Always visible to allow updates)
+    with st.expander("📂 Manage Memory File", expanded=not mem_exists):
+        if not mem_exists:
+            st.warning("Upload 'Market Segment.xlsx' to fix 'N/A' results.")
+        
+        uploaded_mem = st.file_uploader("Upload .xlsx File", type=['xlsx'], key="mem_upload_manager")
         if uploaded_mem:
-            with open("Market Segment.xlsx", "wb") as f:
-                f.write(uploaded_mem.getbuffer())
-            st.success("File Saved!")
+            save_memory_file(uploaded_mem)
+            st.success("Memory Updated Successfully!")
             time.sleep(1)
             st.rerun()
 
@@ -383,7 +403,6 @@ with tab_batch:
                         st.success(f"Captured {len(st.session_state.scraped_df)} intelligence records.")
                         
                         # --- CRITICAL FIX 1: AUTO-REFRESH ---
-                        # This forces the page to reload so the "Start AI" button sees the new data and enables itself.
                         time.sleep(1)
                         st.rerun()
             
@@ -397,56 +416,56 @@ with tab_batch:
             elif not formatted_api_key:
                 st.warning("⚠️ Token Required in Sidebar.")
             elif not mem_exists:
-                 st.warning("⚠️ 'Analyst Memory' (Market Segment.xlsx) is missing! Results will be incomplete. Please upload it in the Sidebar.")
-            
-            rag_status = st.status("🧠 Analyzing Intelligence Data...", expanded=True)
-            rag_progress = st.progress(0)
-            
-            try:
-                df_to_process = st.session_state.scraped_df
-                results = []
-                total_rows = len(df_to_process)
+                 st.error("⛔ STOP: 'Analyst Memory' (Market Segment.xlsx) is missing! Running now will result in 'N/A' data. Please upload the file in the sidebar.")
+            else:
+                rag_status = st.status("🧠 Analyzing Intelligence Data...", expanded=True)
+                rag_progress = st.progress(0)
                 
-                for idx, row in df_to_process.iterrows():
-                    rag_status.write(f"Processing Record {idx + 1}/{total_rows}")
-                    rag_progress.progress((idx + 1) / total_rows)
+                try:
+                    df_to_process = st.session_state.scraped_df
+                    results = []
+                    total_rows = len(df_to_process)
                     
-                    desc = str(row.get("Description of Contract", ""))
-                    c_date = str(row.get("Contract Date", ""))
-                    pre_supplier = str(row.get("Supplier Name", ""))
+                    for idx, row in df_to_process.iterrows():
+                        rag_status.write(f"Processing Record {idx + 1}/{total_rows}")
+                        rag_progress.progress((idx + 1) / total_rows)
+                        
+                        desc = str(row.get("Description of Contract", ""))
+                        c_date = str(row.get("Contract Date", ""))
+                        pre_supplier = str(row.get("Supplier Name", ""))
+                        
+                        try:
+                            # 1. Classify
+                            res = classify_record_with_memory(desc, c_date)
+                            # 2. Validate
+                            try: res = run_all_validations(res, desc)
+                            except: pass
+                            
+                            # 3. Standardize
+                            if pre_supplier == "Multiple": res["Supplier Name"] = "Multiple"
+                            if "Value (Million)" in res: res["Value (USD$ Million)"] = res["Value (Million)"]
+                            
+                            # 4. Map Metadata
+                            res.update({
+                                "Description of Contract": desc, "Contract Date": c_date,
+                                "Source Link(s)": row.get("Source Link(s)", ""), "Header": row.get("Header", ""),
+                                "Reported Date (By SGA)": datetime.datetime.now().strftime("%Y-%m-%d")
+                            })
+                            results.append(res)
+                        except Exception as e:
+                            results.append({"Description of Contract": desc, "Additional Notes (Internal Only)": f"Error: {e}"})
                     
-                    try:
-                        # 1. Classify
-                        res = classify_record_with_memory(desc, c_date)
-                        # 2. Validate
-                        try: res = run_all_validations(res, desc)
-                        except: pass
-                        
-                        # 3. Standardize
-                        if pre_supplier == "Multiple": res["Supplier Name"] = "Multiple"
-                        if "Value (Million)" in res: res["Value (USD$ Million)"] = res["Value (Million)"]
-                        
-                        # 4. Map Metadata
-                        res.update({
-                            "Description of Contract": desc, "Contract Date": c_date,
-                            "Source Link(s)": row.get("Source Link(s)", ""), "Header": row.get("Header", ""),
-                            "Reported Date (By SGA)": datetime.datetime.now().strftime("%Y-%m-%d")
-                        })
-                        results.append(res)
-                    except Exception as e:
-                        results.append({"Description of Contract": desc, "Additional Notes (Internal Only)": f"Error: {e}"})
-                
-                rag_status.update(label="✅ Analysis Complete", state="complete", expanded=False)
-                
-                processed_df = pd.DataFrame(results)
-                for col in TARGET_COLUMNS:
-                    if col not in processed_df.columns: processed_df[col] = ""
-                
-                st.session_state.final_df = processed_df[TARGET_COLUMNS]
-                st.toast("Analysis Complete! Switch to 'Intel Dashboard' tab.", icon="🎉")
-                
-            except Exception as e:
-                st.error(f"Pipeline Error: {e}")
+                    rag_status.update(label="✅ Analysis Complete", state="complete", expanded=False)
+                    
+                    processed_df = pd.DataFrame(results)
+                    for col in TARGET_COLUMNS:
+                        if col not in processed_df.columns: processed_df[col] = ""
+                    
+                    st.session_state.final_df = processed_df[TARGET_COLUMNS]
+                    st.toast("Analysis Complete! Switch to 'Intel Dashboard' tab.", icon="🎉")
+                    
+                except Exception as e:
+                    st.error(f"Pipeline Error: {e}")
 
 # ==========================================================
 # TAB 2: DASHBOARD & EXPORT
