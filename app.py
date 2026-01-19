@@ -70,17 +70,15 @@ st.markdown("""
     button[kind="primary"] {
         background: linear-gradient(90deg, #004e98 0%, #003366 100%);
         border: none;
+        color: white;
     }
     button[kind="primary"]:hover { box-shadow: 0 4px 12px rgba(0,78,152,0.4); }
 
     /* Secondary Action Button */
-    button[kind="secondary"] { border: 1px solid #004e98; color: #004e98; }
+    button[kind="secondary"] { border: 1px solid #004e98; color: #004e98; background-color: white; }
     
     /* Status Box */
     .status-box { padding: 15px; border-radius: 8px; background-color: #eef2f5; margin-bottom: 10px; }
-    
-    /* Custom Footer */
-    .footer { position: fixed; bottom: 0; right: 0; padding: 10px; font-size: 0.8em; color: #888; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -285,6 +283,7 @@ with tab_batch:
             
         with col_act2:
             st.markdown("##### Phase 2: Analysis")
+            # Logic: Button is disabled if no scraped data exists
             start_rag = st.button("🧠 Start AI Processor", type="secondary", use_container_width=True, disabled=st.session_state.scraped_df is None)
 
         # --- SCRAPER LOGIC ---
@@ -366,7 +365,11 @@ with tab_batch:
                     if not st.session_state.scraped_df.empty:
                         st.session_state.scraped_df['Contract Date'] = pd.to_datetime(st.session_state.scraped_df['Contract Date']).dt.date
                         st.success(f"Captured {len(st.session_state.scraped_df)} intelligence records.")
-                        st.dataframe(st.session_state.scraped_df, use_container_width=True)
+                        
+                        # --- CRITICAL FIX 1: AUTO-REFRESH ---
+                        # This forces the page to reload so the "Start AI" button sees the new data and enables itself.
+                        time.sleep(1)
+                        st.rerun()
             
             except Exception as e:
                 st.error(f"Critical System Failure: {e}")
@@ -460,11 +463,18 @@ with tab_dashboard:
         st.subheader("📝 Review & Edit Intelligence")
         st.info("Double-click any cell to edit data before export.")
         
+        # --- CRITICAL FIX 2: COLUMN VISIBILITY IN CLOUD ---
+        # Setting use_container_width=False forces horizontal scrolling,
+        # preventing the cloud deployment from squashing 30 columns into zero width.
         edited_df = st.data_editor(
             df_viz, 
             num_rows="dynamic",
-            use_container_width=True,
-            height=400
+            use_container_width=False,  # <--- THIS IS THE KEY FIX
+            height=600,
+            column_config={
+                "Value (USD$ Million)": st.column_config.NumberColumn(format="$%.2f"),
+                "Source Link(s)": st.column_config.LinkColumn("Source"),
+            }
         )
         
         # 4. EXPORT
@@ -488,7 +498,6 @@ with tab_dashboard:
         
     else:
         st.info("⚠️ No intelligence data available yet. Please run the Batch Processing workflow first.")
-        #  could theoretically go here, but code is better.
 
 # ==========================================================
 # TAB 3: ANALYST SANDBOX
