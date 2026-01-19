@@ -159,10 +159,13 @@ def create_dashboard_metrics(df):
     if "Market Segment" in df.columns:
         seg_counts = df["Market Segment"].value_counts().reset_index()
         seg_counts.columns = ["Segment", "Count"]
-        fig_pie = px.pie(seg_counts, values='Count', names='Segment', hole=0.4, 
-                         color_discrete_sequence=px.colors.sequential.RdBu,
-                         title="Contracts by Market Segment")
-        fig_pie.update_layout(height=350, margin=dict(t=30, b=0, l=0, r=0))
+        if not seg_counts.empty:
+            fig_pie = px.pie(seg_counts, values='Count', names='Segment', hole=0.4, 
+                             color_discrete_sequence=px.colors.sequential.RdBu,
+                             title="Contracts by Market Segment")
+            fig_pie.update_layout(height=350, margin=dict(t=30, b=0, l=0, r=0))
+        else:
+            fig_pie = None
     else:
         fig_pie = None
 
@@ -173,11 +176,14 @@ def create_dashboard_metrics(df):
         plot_df["Value (USD$ Million)"] = pd.to_numeric(plot_df["Value (USD$ Million)"], errors='coerce').fillna(0)
         country_val = plot_df.groupby("Customer Country")["Value (USD$ Million)"].sum().reset_index().sort_values("Value (USD$ Million)", ascending=False).head(10)
         
-        fig_bar = px.bar(country_val, x="Customer Country", y="Value (USD$ Million)",
-                         color="Value (USD$ Million)", 
-                         color_continuous_scale="Blues",
-                         title="Top 10 Customer Countries by Detected Value ($M)")
-        fig_bar.update_layout(height=350, margin=dict(t=30, b=0, l=0, r=0))
+        if not country_val.empty:
+            fig_bar = px.bar(country_val, x="Customer Country", y="Value (USD$ Million)",
+                             color="Value (USD$ Million)", 
+                             color_continuous_scale="Blues",
+                             title="Top 10 Customer Countries by Detected Value ($M)")
+            fig_bar.update_layout(height=350, margin=dict(t=30, b=0, l=0, r=0))
+        else:
+            fig_bar = None
     else:
         fig_bar = None
         
@@ -210,12 +216,22 @@ with st.sidebar:
         st.markdown("❌ **RAG Core:** `Offline`")
         st.error("Missing `src` folder")
 
-    # Memory Check
+    # Memory Check & Uploader
     mem_path = "Market Segment.xlsx"
-    if os.path.exists(mem_path) or os.path.exists("/content/" + mem_path):
+    mem_exists = os.path.exists(mem_path) or os.path.exists("/content/" + mem_path)
+    
+    if mem_exists:
         st.markdown("✅ **Analyst Memory:** `Loaded`")
     else:
         st.markdown("⚠️ **Analyst Memory:** `Not Found`")
+        st.info("Upload 'Market Segment.xlsx' to enable advanced classification.")
+        uploaded_mem = st.file_uploader("Upload Memory File", type=['xlsx'], key="mem_upload")
+        if uploaded_mem:
+            with open("Market Segment.xlsx", "wb") as f:
+                f.write(uploaded_mem.getbuffer())
+            st.success("File Saved!")
+            time.sleep(1)
+            st.rerun()
 
 # --- MAIN UI ---
 st.title("🛡️ Defense Contract Intelligence Hub")
@@ -380,55 +396,57 @@ with tab_batch:
                 st.error("Missing RAG Modules.")
             elif not formatted_api_key:
                 st.warning("⚠️ Token Required in Sidebar.")
-            else:
-                rag_status = st.status("🧠 Analyzing Intelligence Data...", expanded=True)
-                rag_progress = st.progress(0)
+            elif not mem_exists:
+                 st.warning("⚠️ 'Analyst Memory' (Market Segment.xlsx) is missing! Results will be incomplete. Please upload it in the Sidebar.")
+            
+            rag_status = st.status("🧠 Analyzing Intelligence Data...", expanded=True)
+            rag_progress = st.progress(0)
+            
+            try:
+                df_to_process = st.session_state.scraped_df
+                results = []
+                total_rows = len(df_to_process)
                 
-                try:
-                    df_to_process = st.session_state.scraped_df
-                    results = []
-                    total_rows = len(df_to_process)
+                for idx, row in df_to_process.iterrows():
+                    rag_status.write(f"Processing Record {idx + 1}/{total_rows}")
+                    rag_progress.progress((idx + 1) / total_rows)
                     
-                    for idx, row in df_to_process.iterrows():
-                        rag_status.write(f"Processing Record {idx + 1}/{total_rows}")
-                        rag_progress.progress((idx + 1) / total_rows)
+                    desc = str(row.get("Description of Contract", ""))
+                    c_date = str(row.get("Contract Date", ""))
+                    pre_supplier = str(row.get("Supplier Name", ""))
+                    
+                    try:
+                        # 1. Classify
+                        res = classify_record_with_memory(desc, c_date)
+                        # 2. Validate
+                        try: res = run_all_validations(res, desc)
+                        except: pass
                         
-                        desc = str(row.get("Description of Contract", ""))
-                        c_date = str(row.get("Contract Date", ""))
-                        pre_supplier = str(row.get("Supplier Name", ""))
+                        # 3. Standardize
+                        if pre_supplier == "Multiple": res["Supplier Name"] = "Multiple"
+                        if "Value (Million)" in res: res["Value (USD$ Million)"] = res["Value (Million)"]
                         
-                        try:
-                            # 1. Classify
-                            res = classify_record_with_memory(desc, c_date)
-                            # 2. Validate
-                            try: res = run_all_validations(res, desc)
-                            except: pass
-                            
-                            # 3. Standardize
-                            if pre_supplier == "Multiple": res["Supplier Name"] = "Multiple"
-                            if "Value (Million)" in res: res["Value (USD$ Million)"] = res["Value (Million)"]
-                            
-                            # 4. Map Metadata
-                            res.update({
-                                "Description of Contract": desc, "Contract Date": c_date,
-                                "Source Link(s)": row.get("Source Link(s)", ""), "Header": row.get("Header", ""),
-                                "Reported Date (By SGA)": datetime.datetime.now().strftime("%Y-%m-%d")
-                            })
-                            results.append(res)
-                        except Exception as e:
-                            results.append({"Description of Contract": desc, "Additional Notes (Internal Only)": f"Error: {e}"})
-                    
-                    rag_status.update(label="✅ Analysis Complete", state="complete", expanded=False)
-                    
-                    processed_df = pd.DataFrame(results)
-                    for col in TARGET_COLUMNS:
-                        if col not in processed_df.columns: processed_df[col] = ""
-                    
-                    st.session_state.final_df = processed_df[TARGET_COLUMNS]
-                    st.toast("Analysis Complete! Switch to 'Intel Dashboard' tab.", icon="🎉")
-                    
-                except Exception as e:
-                    st.error(f"Pipeline Error: {e}")
+                        # 4. Map Metadata
+                        res.update({
+                            "Description of Contract": desc, "Contract Date": c_date,
+                            "Source Link(s)": row.get("Source Link(s)", ""), "Header": row.get("Header", ""),
+                            "Reported Date (By SGA)": datetime.datetime.now().strftime("%Y-%m-%d")
+                        })
+                        results.append(res)
+                    except Exception as e:
+                        results.append({"Description of Contract": desc, "Additional Notes (Internal Only)": f"Error: {e}"})
+                
+                rag_status.update(label="✅ Analysis Complete", state="complete", expanded=False)
+                
+                processed_df = pd.DataFrame(results)
+                for col in TARGET_COLUMNS:
+                    if col not in processed_df.columns: processed_df[col] = ""
+                
+                st.session_state.final_df = processed_df[TARGET_COLUMNS]
+                st.toast("Analysis Complete! Switch to 'Intel Dashboard' tab.", icon="🎉")
+                
+            except Exception as e:
+                st.error(f"Pipeline Error: {e}")
 
 # ==========================================================
 # TAB 2: DASHBOARD & EXPORT
@@ -517,6 +535,8 @@ with tab_demo:
         if st.button("⚡ Analyze Fragment", type="primary"):
             if not formatted_api_key:
                 st.error("Please enter API Token in Sidebar.")
+            elif not mem_exists:
+                st.error("Missing Analyst Memory File (Market Segment.xlsx). Upload in Sidebar.")
             else:
                 with st.spinner("Classifying..."):
                     try:
