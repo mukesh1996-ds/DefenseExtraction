@@ -51,6 +51,7 @@ st.markdown("""
         border-radius: 8px;
         border-left: 5px solid #004e98;
     }
+    .css-card { background-color: white; border-radius: 10px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); }
     
     /* Buttons */
     .stButton>button {
@@ -217,7 +218,7 @@ with st.sidebar:
 # --- MAIN UI ---
 st.title("🛡️ Defense Contract Intelligence Hub")
 
-tab_batch, tab_dashboard = st.tabs(["📁 Intelligence Cycle", "📊 Dashboard & Export"])
+tab_batch, tab_dashboard, tab_demo = st.tabs(["📁 Intelligence Cycle", "📊 Dashboard & Export", "🧪 Analyst Sandbox"])
 
 # ==========================================================
 # TAB 1: INTELLIGENCE CYCLE
@@ -387,3 +388,52 @@ with tab_dashboard:
         st.download_button("📥 Download Excel", output.getvalue(), "Defense_Intel.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
         st.info("No analysis results yet.")
+
+# ==========================================================
+# TAB 3: ANALYST SANDBOX (RESTORED)
+# ==========================================================
+with tab_demo:
+    st.markdown("### 🧪 Laboratory Environment")
+    st.caption("Test specific contract text against the AI model without running a full batch.")
+    
+    col_input, col_view = st.columns([1, 1])
+    
+    with col_input:
+        demo_text = st.text_area("Input Contract Text:", height=300, 
+            placeholder="Example: Raytheon Missiles & Defense was awarded a $250M modification for Tomahawk cruise missile production...")
+        
+        demo_date = st.date_input("Contract Date", value=datetime.date.today())
+        
+        # Same STRICT checks here too
+        if st.button("⚡ Analyze Fragment", type="primary"):
+            mem_exists = os.path.exists("Market Segment.xlsx")
+            
+            if not formatted_api_key:
+                st.error("Please enter API Token in Sidebar.")
+            elif not mem_exists:
+                st.error("Missing Analyst Memory File (Market Segment.xlsx). Upload in Sidebar.")
+            else:
+                with st.spinner("Classifying..."):
+                    try:
+                        d_res = classify_record_with_memory(demo_text, str(demo_date))
+                        d_res = run_all_validations(d_res, demo_text)
+                        st.session_state['demo_result'] = d_res
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+
+    with col_view:
+        if 'demo_result' in st.session_state:
+            res = st.session_state['demo_result']
+            
+            # Visualizing the Result as a Card
+            st.markdown(f"""
+            <div class="css-card">
+                <h4 style="color:#004e98;">{res.get('Supplier Name', 'Unknown Supplier')}</h4>
+                <p><strong>System:</strong> {res.get('System Name (Specific)', 'N/A')}</p>
+                <p><strong>Value:</strong> ${res.get('Value (USD$ Million)', '0')} M</p>
+                <hr>
+                <small>{res.get('Customer Country', 'Unknown')} | {res.get('Market Segment', 'Unknown')}</small>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.json(res, expanded=False)
