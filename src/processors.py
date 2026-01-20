@@ -115,6 +115,7 @@ def call_llm(prompt_text: str, system_message: str = "You are a helpful assistan
     time.sleep(0.2)
 
     try:
+        # Create client inside the function to ensure fresh connection
         client = OpenAI(base_url=BASE_URL)
 
         response = client.chat.completions.create(
@@ -124,7 +125,8 @@ def call_llm(prompt_text: str, system_message: str = "You are a helpful assistan
                 {"role": "user", "content": prompt_text}
             ],
             temperature=0,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            timeout=60.0  # <--- THIS IS THE FIX (Wait up to 60 seconds)
         )
 
         content = response.choices[0].message.content
@@ -137,7 +139,8 @@ def call_llm(prompt_text: str, system_message: str = "You are a helpful assistan
     except Exception as e:
         print(f"❌ LLM Call Error: {e}")
         return {}
-
+    
+    
 
 def get_similar_example(new_text: str):
     """
