@@ -10,7 +10,7 @@ import json
 import datetime
 import traceback
 from bs4 import BeautifulSoup
-from io import BytesIO
+from io import BytesIO, StringIO
 
 # Visualization
 import plotly.express as px
@@ -350,7 +350,10 @@ with tab_batch:
                         try:
                             res = classify_record_with_memory(desc, c_date) 
                             res = run_all_validations(res, desc)
-                            res.update(row.to_dict())
+                            row_dict=row.to_dict()
+                            row_dict.pop("Supplier Name",None)
+                            res.update(row_dict)
+
                             res["Reported Date (By SGA)"] = datetime.datetime.now().strftime("%Y-%m-%d")
                             results.append(res)
                         except Exception as row_ex:
