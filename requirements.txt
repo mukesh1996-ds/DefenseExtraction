@@ -12,3 +12,4 @@ beautifulsoup4
 streamlit
 xlsxwriter
 plotly
+scikit-learn
