@@ -246,7 +246,7 @@ with st.sidebar:
 
     with st.expander("📜 Runtime Logs"):
         if st.session_state.logs:
-            st.dataframe(pd.DataFrame(st.session_state.logs), use_containerwidth='stretch', height=250)
+            st.dataframe(pd.DataFrame(st.session_state.logs), width='stretch', height=250)
         else:
             st.info("No logs yet.")
 
