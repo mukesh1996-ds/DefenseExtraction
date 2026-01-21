@@ -246,7 +246,7 @@ with st.sidebar:
 
     with st.expander("📜 Runtime Logs"):
         if st.session_state.logs:
-            st.dataframe(pd.DataFrame(st.session_state.logs), use_container_width=True, height=250)
+            st.dataframe(pd.DataFrame(st.session_state.logs), use_containerwidth='stretch', height=250)
         else:
             st.info("No logs yet.")
 
@@ -281,7 +281,7 @@ with tab_cycle:
     if uploaded_file:
         df_source = pd.read_excel(uploaded_file)
         st.info(f"✅ Target Loaded: {len(df_source)} rows")
-        st.dataframe(df_source.head(5), use_container_width=True)
+        st.dataframe(df_source.head(5), width='stretch')
 
         if "Source URL" not in df_source.columns:
             st.error("❌ Input Excel must contain column: 'Source URL'")
@@ -419,7 +419,7 @@ with tab_cycle:
                 st.success(f"✅ Scraping complete: {len(st.session_state.scraped_df)} records")
                 log_event(f"✅ Scraping complete. Records: {len(st.session_state.scraped_df)}", "SUCCESS")
 
-                st.dataframe(st.session_state.scraped_df.head(15), use_container_width=True)
+                st.dataframe(st.session_state.scraped_df.head(15), width='stretch')
             else:
                 st.session_state.scraped_df = None
                 st.warning("⚠️ Scraping finished but found 0 matched records.")
@@ -518,7 +518,7 @@ with tab_cycle:
                 status.update(label="✅ AI Processing Complete", state="complete", expanded=False)
                 st.success("✅ Extraction + Validation Complete!")
 
-                st.dataframe(st.session_state.final_df.head(15), use_container_width=True)
+                st.dataframe(st.session_state.final_df.head(15), width='stretch')
 
 
 # ==========================================================
@@ -552,7 +552,7 @@ with tab_dashboard:
                 seg_counts.columns = ["Market Segment", "Count"]
                 fig = px.pie(seg_counts, values="Count", names="Market Segment", hole=0.4,
                              title="Contracts by Market Segment")
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
         with ch2:
             if "Customer Country" in df.columns:
@@ -565,7 +565,7 @@ with tab_dashboard:
                 )
                 fig2 = px.bar(top_country, x="Customer Country", y="Value (USD$ Million)",
                               title="Top 10 Countries by Contract Value")
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, uwidth='stretch')
 
         st.divider()
         st.subheader("🧾 Review & Edit Extracted Data")
@@ -573,7 +573,7 @@ with tab_dashboard:
         edited = st.data_editor(
             df.drop(columns=["__validation__"], errors="ignore"),
             num_rows="dynamic",
-            use_container_width=True,
+            width='stretch',
             height=520
         )
 
@@ -589,7 +589,7 @@ with tab_dashboard:
                 excel_bytes,
                 excel_name,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True
+                width='stretch'
             )
 
         with colE2:
@@ -599,7 +599,7 @@ with tab_dashboard:
                 csv_data,
                 "Defense_Intel.csv",
                 "text/csv",
-                use_container_width=True
+                uswidth='stretch'
             )
 
 
@@ -632,9 +632,9 @@ with tab_validation:
     show_failed_only = st.toggle("Show only failed validations", value=True)
 
     if show_failed_only:
-        st.dataframe(val_df[val_df["Status"] == "❌ FAIL"], use_container_width=True, height=420)
+        st.dataframe(val_df[val_df["Status"] == "❌ FAIL"], width='stretch', height=420)
     else:
-        st.dataframe(val_df, use_container_width=True, height=420)
+        st.dataframe(val_df, width='stretch', height=420)
 
     st.divider()
     st.subheader("🧾 Row-wise Validation (Expand)")
@@ -667,4 +667,4 @@ with tab_validation:
                         "Status": "✅ PASS" if meta.get("passed") else "❌ FAIL",
                         "Reason": meta.get("reason", "")
                     })
-                st.dataframe(pd.DataFrame(row_val), use_container_width=True)
+                st.dataframe(pd.DataFrame(row_val), width='stretch')
