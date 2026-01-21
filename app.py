@@ -599,7 +599,7 @@ with tab_dashboard:
                 csv_data,
                 "Defense_Intel.csv",
                 "text/csv",
-                uswidth='stretch'
+                width='stretch'
             )
 
 
